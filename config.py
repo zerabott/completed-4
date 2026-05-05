@@ -61,7 +61,7 @@ try:
             ADMIN_IDS.append(admin_id)
     
     # Get mini admin IDs (can approve/reply but no dashboard access)
-    MINI_ADMIN_IDS = [6529683483]
+    MINI_ADMIN_IDS = [6529683483,1239686745]
     for i in range(1, 6):  # Support up to 5 mini admins
         mini_admin_id = get_env_int(f"MINI_ADMIN_ID_{i}", required=False)
         if mini_admin_id:

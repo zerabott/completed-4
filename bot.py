@@ -21,6 +21,17 @@ from db import upsert_user_profile, get_user_profile, delete_user_profile
 from db import set_profile_visibility, set_profile_accepting_contacts
 from db import get_user_profile_stats
 from db import (
+    get_profile_contact,
+    get_profile_contact_by_id,
+    create_profile_contact,
+    update_profile_contact_status,
+    touch_profile_contact,
+    block_profile_user,
+    is_profile_blocked_either_way,
+    get_user_daily_message_count,
+    increment_user_daily_message_count,
+)
+from db import (
     async_add_user,
     async_is_blocked_user,
     async_get_user_info,

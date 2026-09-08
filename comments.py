@@ -1,11 +1,12 @@
+import asyncio
 import time
 from functools import lru_cache
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from config import COMMENTS_PER_PAGE, CHANNEL_ID, BOT_USERNAME
 from text_utils import escape_markdown_text
-from db import get_comment_count, get_user_profile, get_post_author_id
+from db import get_comment_count, get_user_profile, get_user_profiles_bulk, get_post_author_id
 from submission import is_media_post, get_media_info
-from db_connection import get_db_connection, execute_query, adapt_query
+from db_connection import get_db_connection, execute_query, adapt_query, AsyncDBWrapper
 from ranking_integration import RankingIntegration
 import logging
 
@@ -60,6 +61,94 @@ def get_cached_user_rank(user_id):
             'is_special_rank': False
         }
         return default_rank
+
+def prefetch_comment_page_data(user_id, comments_flat):
+    """Fetch reactions, profiles and ranks for a whole comment page in 3 round trips.
+
+    Returns the viewer's reactions as {comment_id: reaction_type}; profiles and ranks
+    are warmed into the module caches that format_comment_display reads.
+    """
+    comment_ids = [c['comment_id'] for c in comments_flat]
+    commenter_ids = [c.get('user_id') for c in comments_flat if c.get('user_id')]
+    if not comment_ids:
+        return {}
+
+    db_conn = get_db_connection()
+    placeholder = db_conn.get_placeholder()
+
+    reactions = {}
+    try:
+        with db_conn.get_connection(readonly=True) as conn:
+            cursor = conn.cursor()
+            placeholders = ', '.join([placeholder] * len(comment_ids))
+            cursor.execute(
+                f"""SELECT target_id, reaction_type FROM reactions
+                    WHERE user_id = {placeholder} AND target_type = 'comment'
+                      AND target_id IN ({placeholders})""",
+                (user_id, *comment_ids),
+            )
+            reactions = {row[0]: row[1] for row in cursor.fetchall()}
+    except Exception as e:
+        logger.error(f"Error prefetching reactions for user {user_id}: {e}")
+
+    if commenter_ids:
+        try:
+            profiles = get_user_profiles_bulk(commenter_ids)
+            expiry = time.time() + _cache_expiry
+            for commenter_id, profile in profiles.items():
+                _profile_cache[commenter_id] = (profile, expiry)
+        except Exception as e:
+            logger.error(f"Error prefetching commenter profiles: {e}")
+
+        try:
+            _prefetch_user_ranks(commenter_ids)
+        except Exception as e:
+            logger.error(f"Error prefetching commenter ranks: {e}")
+
+    return reactions
+
+
+def _prefetch_user_ranks(user_ids):
+    """Load ranks for several users in one query and warm the rank cache."""
+    now = time.time()
+    missing = [
+        uid for uid in dict.fromkeys(user_ids)
+        if not (uid in _rank_cache and now < _rank_cache[uid][1])
+    ]
+    if not missing:
+        return
+
+    db_conn = get_db_connection()
+    placeholders = ', '.join([db_conn.get_placeholder()] * len(missing))
+    with db_conn.get_connection(readonly=True) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""SELECT ur.user_id, rd.rank_name, rd.rank_emoji, ur.total_points, rd.is_special
+                FROM user_rankings ur
+                JOIN rank_definitions rd ON ur.current_rank_id = rd.rank_id
+                WHERE ur.user_id IN ({placeholders})""",
+            tuple(missing),
+        )
+        rows = {
+            row[0]: {
+                'rank_name': row[1],
+                'rank_emoji': row[2],
+                'total_points': row[3],
+                'is_special_rank': bool(row[4]),
+            }
+            for row in cursor.fetchall()
+        }
+
+    default_rank = {
+        'rank_name': 'Freshman',
+        'rank_emoji': '🥉',
+        'total_points': 0,
+        'is_special_rank': False,
+    }
+    expiry = now + _cache_expiry
+    for user_id in missing:
+        _rank_cache[user_id] = (rows.get(user_id, dict(default_rank)), expiry)
+
 
 def get_user_rank_for_comment(user_id):
     """Get user's rank information for displaying under comments"""
@@ -148,17 +237,21 @@ def save_comment(post_id, content, user_id, parent_comment_id=None):
 
 async def save_comment_with_points(post_id, content, user_id, context, parent_comment_id=None):
     """Save a comment and award points"""
-    # Save comment first
-    comment_id, error = save_comment(post_id, content, user_id, parent_comment_id)
-    
+    comment_id, error = await AsyncDBWrapper.run_sync(
+        save_comment, post_id, content, user_id, parent_comment_id
+    )
+
     if comment_id and not error:
-        # Award points for the comment
-        try:
-            await RankingIntegration.handle_comment_posted(user_id, post_id, comment_id, content, context)
-            logger.info(f"Awarded comment points to user {user_id} for comment {comment_id}")
-        except Exception as e:
-            logger.error(f"Error awarding comment points: {e}")
-    
+        # Points don't change the confirmation the user is waiting for, so award them in the background
+        async def award_points():
+            try:
+                await RankingIntegration.handle_comment_posted(user_id, post_id, comment_id, content, context)
+                logger.info(f"Awarded comment points to user {user_id} for comment {comment_id}")
+            except Exception as e:
+                logger.error(f"Error awarding comment points: {e}")
+
+        asyncio.create_task(award_points())
+
     return comment_id, error
 
 def get_post_with_channel_info(post_id):
@@ -178,27 +271,7 @@ def get_comments_paginated(post_id, page=1):
     offset = (page - 1) * COMMENTS_PER_PAGE
 
     try:
-        # Get total count using the existing function
-        total_comments = get_comment_count(post_id)
-
-        # Get paginated comments in flat structure
         db_conn = get_db_connection()
-
-        # Get the original confessor (post author) for this post once
-        post_author_id = None
-        try:
-            with db_conn.get_connection() as conn_info:
-                cursor_info = conn_info.cursor()
-                placeholder = db_conn.get_placeholder()
-                cursor_info.execute(
-                    f"SELECT user_id FROM posts WHERE post_id = {placeholder}",
-                    (post_id,)
-                )
-                row = cursor_info.fetchone()
-                if row:
-                    post_author_id = row[0]
-        except Exception as e:
-            logger.error(f"Error fetching post author for post {post_id}: {e}")
 
         if db_conn.use_postgresql:
             # PostgreSQL version with ROW_NUMBER() and user_id for rank display
@@ -221,8 +294,20 @@ def get_comments_paginated(post_id, page=1):
                 LIMIT {db_conn.get_placeholder()} OFFSET {db_conn.get_placeholder()}
             """
         
-        with db_conn.get_connection() as conn:
+        with db_conn.get_connection(readonly=True) as conn:
             cursor = conn.cursor()
+
+            # Total count and the original confessor in one round trip
+            placeholder = db_conn.get_placeholder()
+            cursor.execute(
+                f"""SELECT (SELECT COUNT(*) FROM comments WHERE post_id = {placeholder}),
+                           (SELECT user_id FROM posts WHERE post_id = {placeholder})""",
+                (post_id, post_id),
+            )
+            header_row = cursor.fetchone()
+            total_comments = header_row[0] if header_row else 0
+            post_author_id = header_row[1] if header_row else None
+
             cursor.execute(query, (post_id, COMMENTS_PER_PAGE, offset))
             comments = cursor.fetchall()
 
@@ -308,18 +393,34 @@ def get_comment_by_id(comment_id):
 
 def react_to_comment(user_id, comment_id, reaction_type):
     """Add or update reaction to a comment"""
+    success, action, likes, dislikes, _owner_id = apply_comment_reaction(user_id, comment_id, reaction_type)
+    return success, action, likes, dislikes
+
+
+def apply_comment_reaction(user_id, comment_id, reaction_type):
+    """Toggle a reaction and return (success, action, likes, dislikes, comment_owner_id).
+
+    The comment owner comes back with the existing reaction so the caller can award
+    points without another round trip.
+    """
     try:
         db_conn = get_db_connection()
         with db_conn.get_connection() as conn:
             cursor = conn.cursor()
             placeholder = db_conn.get_placeholder()
-            
-            # Check existing reaction
+            returning = " RETURNING likes, dislikes" if db_conn.use_postgresql else ""
+
+            # Existing reaction and comment owner in one round trip
             cursor.execute(
-                f"SELECT reaction_type FROM reactions WHERE user_id = {placeholder} AND target_type = 'comment' AND target_id = {placeholder}",
-                (user_id, comment_id)
+                f"""SELECT (SELECT reaction_type FROM reactions
+                            WHERE user_id = {placeholder} AND target_type = 'comment'
+                              AND target_id = {placeholder}),
+                           (SELECT user_id FROM comments WHERE comment_id = {placeholder})""",
+                (user_id, comment_id, comment_id)
             )
-            existing = cursor.fetchone()
+            row = cursor.fetchone()
+            existing = (row[0],) if row and row[0] else None
+            comment_owner_id = row[1] if row else None
             
             if existing:
                 if existing[0] == reaction_type:
@@ -331,12 +432,12 @@ def react_to_comment(user_id, comment_id, reaction_type):
                     # Update comment counts
                     if reaction_type == 'like':
                         cursor.execute(
-                            f"UPDATE comments SET likes = likes - 1 WHERE comment_id = {placeholder}",
+                            f"UPDATE comments SET likes = likes - 1 WHERE comment_id = {placeholder}{returning}",
                             (comment_id,)
                         )
                     else:
                         cursor.execute(
-                            f"UPDATE comments SET dislikes = dislikes - 1 WHERE comment_id = {placeholder}",
+                            f"UPDATE comments SET dislikes = dislikes - 1 WHERE comment_id = {placeholder}{returning}",
                             (comment_id,)
                         )
                     action = "removed"
@@ -349,12 +450,12 @@ def react_to_comment(user_id, comment_id, reaction_type):
                     # Update comment counts
                     if existing[0] == 'like':
                         cursor.execute(
-                            f"UPDATE comments SET likes = likes - 1, dislikes = dislikes + 1 WHERE comment_id = {placeholder}",
+                            f"UPDATE comments SET likes = likes - 1, dislikes = dislikes + 1 WHERE comment_id = {placeholder}{returning}",
                             (comment_id,)
                         )
                     else:
                         cursor.execute(
-                            f"UPDATE comments SET likes = likes + 1, dislikes = dislikes - 1 WHERE comment_id = {placeholder}",
+                            f"UPDATE comments SET likes = likes + 1, dislikes = dislikes - 1 WHERE comment_id = {placeholder}{returning}",
                             (comment_id,)
                         )
                     action = "changed"
@@ -367,65 +468,60 @@ def react_to_comment(user_id, comment_id, reaction_type):
                 # Update comment counts
                 if reaction_type == 'like':
                     cursor.execute(
-                        f"UPDATE comments SET likes = likes + 1 WHERE comment_id = {placeholder}",
+                        f"UPDATE comments SET likes = likes + 1 WHERE comment_id = {placeholder}{returning}",
                         (comment_id,)
                     )
                 else:
                     cursor.execute(
-                        f"UPDATE comments SET dislikes = dislikes + 1 WHERE comment_id = {placeholder}",
+                        f"UPDATE comments SET dislikes = dislikes + 1 WHERE comment_id = {placeholder}{returning}",
                         (comment_id,)
                     )
                 action = "added"
-            
+
+            if returning:
+                counts = cursor.fetchone()
+            else:
+                counts = None
+
             conn.commit()
-            
-            # Return current counts along with action
-            cursor.execute(
-                f"SELECT likes, dislikes FROM comments WHERE comment_id = {placeholder}",
-                (comment_id,)
-            )
-            counts = cursor.fetchone()
+
+            if counts is None:
+                cursor.execute(
+                    f"SELECT likes, dislikes FROM comments WHERE comment_id = {placeholder}",
+                    (comment_id,)
+                )
+                counts = cursor.fetchone()
+
             current_likes = counts[0] if counts else 0
             current_dislikes = counts[1] if counts else 0
-            
-            return True, action, current_likes, current_dislikes
+
+            return True, action, current_likes, current_dislikes, comment_owner_id
     except Exception as e:
-        return False, str(e), 0, 0
+        return False, str(e), 0, 0, None
 
 async def react_to_comment_with_points(user_id, comment_id, reaction_type, context):
     """Add or update reaction to a comment and award points"""
-    # First, handle the reaction
-    success, action, likes, dislikes = react_to_comment(user_id, comment_id, reaction_type)
-    
-    if success and action in ['added', 'changed']:
-        # Get comment owner for point awarding
-        try:
-            db_conn = get_db_connection()
-            with db_conn.get_connection() as conn:
-                cursor = conn.cursor()
-                placeholder = db_conn.get_placeholder()
-                cursor.execute(
-                    f"SELECT user_id FROM comments WHERE comment_id = {placeholder}",
-                    (comment_id,)
+    success, action, likes, dislikes, comment_owner_id = await AsyncDBWrapper.run_sync(
+        apply_comment_reaction, user_id, comment_id, reaction_type
+    )
+
+    if success and action in ['added', 'changed'] and comment_owner_id is not None:
+        # Points don't affect the reply the user is waiting for, so award them in the background
+        async def award_points():
+            try:
+                await RankingIntegration.handle_reaction_given(
+                    user_id, comment_id, 'comment', reaction_type
                 )
-                result = cursor.fetchone()
-                if result:
-                    comment_owner_id = result[0]
-                    
-                    # Award points to the person giving the reaction
-                    await RankingIntegration.handle_reaction_given(
-                        user_id, comment_id, 'comment', reaction_type
+                if reaction_type == 'like' and comment_owner_id != user_id:
+                    await RankingIntegration.handle_reaction_received(
+                        comment_owner_id, comment_id, 'comment', reaction_type, context
                     )
-                    
-                    # Award points to the person receiving the reaction (only for likes)
-                    if reaction_type == 'like' and comment_owner_id != user_id:
-                        await RankingIntegration.handle_reaction_received(
-                            comment_owner_id, comment_id, 'comment', reaction_type, context
-                        )
-                        logger.info(f"Awarded reaction points: giver={user_id}, receiver={comment_owner_id}")
-        except Exception as e:
-            logger.error(f"Error awarding reaction points: {e}")
-    
+                    logger.info(f"Awarded reaction points: giver={user_id}, receiver={comment_owner_id}")
+            except Exception as e:
+                logger.error(f"Error awarding reaction points: {e}")
+
+        asyncio.create_task(award_points())
+
     return success, action, likes, dislikes
 
 def flag_comment(comment_id):
@@ -591,7 +687,21 @@ def format_reply(parent_text, child_text, parent_author="Anonymous"):
     # Use Telegram's native blockquote styling with expandable feature
     return f"<blockquote expandable>{parent_text}</blockquote>\n\n{child_text}"
 
-def format_comment_display(comment_data, user_id, current_page, comment_index):
+def build_comments_page(post_id, page, user_id):
+    """Fetch and format one page of comments; safe to run in a worker thread."""
+    comments_flat, current_page, total_pages, total_comments = get_comments_paginated(post_id, page)
+    if not comments_flat:
+        return [], current_page, total_pages, total_comments
+
+    user_reactions = prefetch_comment_page_data(user_id, comments_flat)
+    formatted = [
+        format_comment_display(comment, user_id, current_page, index, user_reactions)
+        for index, comment in enumerate(comments_flat)
+    ]
+    return formatted, current_page, total_pages, total_comments
+
+
+def format_comment_display(comment_data, user_id, current_page, comment_index, user_reactions=None):
     """Format a comment for display with optimized data fetching"""
     from html import escape as html_escape
     from utils import format_date_only_html
@@ -633,7 +743,10 @@ def format_comment_display(comment_data, user_id, current_page, comment_index):
     sequential_comment_number = (current_page - 1) * COMMENTS_PER_PAGE + comment_index + 1
     
     # Get user reaction to current comment
-    user_reaction = get_user_reaction(user_id, comment_id)
+    if user_reactions is not None:
+        user_reaction = user_reactions.get(comment_id)
+    else:
+        user_reaction = get_user_reaction(user_id, comment_id)
     like_emoji = "👍✅" if user_reaction == "like" else "👍"
     dislike_emoji = "👎✅" if user_reaction == "dislike" else "👎"
     

@@ -1196,6 +1196,67 @@ def invalidate_user_profile_cache(user_id) -> None:
     cache_manager.delete(f'user_profile_{user_id}')
 
 
+PROFILE_COLUMNS = '''user_id, display_name, emoji, bio, is_active, gender, age,
+                     department, year, religion, relationship_status, other_info, accepting_contacts'''
+
+
+def _profile_row_to_dict(row):
+    return {
+        'user_id': row[0],
+        'display_name': row[1],
+        'emoji': row[2],
+        'bio': row[3] or '',
+        'is_active': bool(row[4]),
+        'gender': row[5] or '',
+        'age': row[6],
+        'department': row[7] or '',
+        'year': row[8] or '',
+        'religion': row[9] or '',
+        'relationship_status': row[10] or '',
+        'other_info': row[11] or '',
+        'accepting_contacts': bool(row[12]) if row[12] is not None else True,
+    }
+
+
+def get_user_profiles_bulk(user_ids):
+    """Return {user_id: profile or None} for many users in a single round trip."""
+    wanted = [uid for uid in dict.fromkeys(user_ids) if uid is not None]
+    if not wanted:
+        return {}
+
+    profiles = {}
+    missing = []
+    for user_id in wanted:
+        cached = cache_manager.get(f'user_profile_{user_id}')
+        if cached is not None:
+            profiles[user_id] = None if cached == 'none' else cached
+        else:
+            missing.append(user_id)
+
+    if missing:
+        db_conn = get_db_connection()
+        with db_conn.get_connection(readonly=True) as conn:
+            cursor = conn.cursor()
+            placeholders = ', '.join([db_conn.get_placeholder()] * len(missing))
+            cursor.execute(
+                f'SELECT {PROFILE_COLUMNS} FROM user_profiles WHERE user_id IN ({placeholders})',
+                tuple(missing),
+            )
+            for row in cursor.fetchall():
+                profile = _profile_row_to_dict(row)
+                profiles[profile['user_id']] = profile
+        for user_id in missing:
+            profile = profiles.get(user_id)
+            profiles[user_id] = profile
+            cache_manager.set(
+                f'user_profile_{user_id}',
+                profile if profile else 'none',
+                PROFILE_CACHE_TTL,
+            )
+
+    return profiles
+
+
 def get_user_profile(user_id):
     """Return user's profile as a dict or None if not set."""
     cache_key = f'user_profile_{user_id}'
@@ -1217,21 +1278,7 @@ def get_user_profile(user_id):
         if not row:
             cache_manager.set(cache_key, 'none', PROFILE_CACHE_TTL)
             return None
-        profile = {
-            'user_id': row[0],
-            'display_name': row[1],
-            'emoji': row[2],
-            'bio': row[3] or '',
-            'is_active': bool(row[4]),
-            'gender': row[5] or '',
-            'age': row[6],
-            'department': row[7] or '',
-            'year': row[8] or '',
-            'religion': row[9] or '',
-            'relationship_status': row[10] or '',
-            'other_info': row[11] or '',
-            'accepting_contacts': bool(row[12]) if row[12] is not None else True,
-        }
+        profile = _profile_row_to_dict(row)
         cache_manager.set(cache_key, profile, PROFILE_CACHE_TTL)
         return profile
 

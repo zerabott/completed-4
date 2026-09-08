@@ -7,6 +7,7 @@ import logging
 import re
 import os
 import asyncio
+import functools
 from typing import Optional
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
@@ -1851,13 +1852,16 @@ async def handle_confession_submission(update: Update, context: ContextTypes.DEF
         return
     
     # Save submission with media info
-    post_id, error = save_submission(
-        user_id, 
-        content, 
-        category, 
-        media_type=media_type,
-        file_id=media_file_id,
-        caption=caption
+    post_id, error = await AsyncDBWrapper.run_sync(
+        functools.partial(
+            save_submission,
+            user_id,
+            content,
+            category,
+            media_type=media_type,
+            file_id=media_file_id,
+            caption=caption,
+        )
     )
     
     if error:
@@ -1867,8 +1871,10 @@ async def handle_confession_submission(update: Update, context: ContextTypes.DEF
     # Points will be awarded only after admin approval
     # await award_points_for_confession_submission(user_id, post_id, category, context)
     
-    # Send to admins for approval with media
-    await send_to_admins_for_approval(context, post_id, content, category, user_id, media_file_id, media_type)
+    # Admin approval requests don't block the submitter's confirmation
+    asyncio.create_task(
+        send_to_admins_for_approval(context, post_id, content, category, user_id, media_file_id, media_type)
+    )
     
     # Determine submission type for confirmation message
     submission_type = "confession"
@@ -2938,7 +2944,7 @@ async def show_comments_directly(update: Update, context: ContextTypes.DEFAULT_T
     """Show comments directly via deep link"""
     try:
         logger.info(f"show_comments_directly called with post_id: {post_id}")
-        post = get_post_by_id(post_id)
+        post = await AsyncDBWrapper.run_sync(get_post_by_id, post_id)
         logger.info(f"Retrieved post: {post}")
         
         if not post or post[5] != 1:  # Check if approved (approved field is at index 5, value 1 = approved)
@@ -2957,15 +2963,18 @@ async def show_comments_directly(update: Update, context: ContextTypes.DEFAULT_T
     # Show comments starting from page 1
     try:
         logger.info(f"Getting paginated comments for post_id: {post_id}")
-        comments_data, current_page, total_pages, total_comments = get_comments_paginated(post_id, 1)
-        logger.info(f"Retrieved comments: data={len(comments_data) if comments_data else 0}, current_page={current_page}, total_pages={total_pages}, total_comments={total_comments}")
+        from comments import build_comments_page
+        comment_messages, current_page, total_pages, total_comments = await AsyncDBWrapper.run_sync(
+            build_comments_page, post_id, 1, update.effective_user.id
+        )
+        logger.info(f"Retrieved comments: data={len(comment_messages)}, current_page={current_page}, total_pages={total_pages}, total_comments={total_comments}")
     except Exception as e:
         logger.error(f"Error getting paginated comments: {e}")
         await update.message.reply_text("❗ Sorry, there was an issue loading comments. Please try again.")
         await show_menu(update, context)
         return
     
-    if not comments_data:
+    if not comment_messages:
         keyboard = [
             [InlineKeyboardButton("💬 Add Comment", callback_data=f"add_comment_{post_id}")],
             [InlineKeyboardButton("🔙 Back to Post", callback_data=f"view_post_{post_id}")],
@@ -2980,8 +2989,6 @@ async def show_comments_directly(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
     
-    user_id = update.effective_user.id
-    
     # Send header message using unified formatting
     header_text = format_comments_header(total_comments, current_page, total_pages)
     await update.message.reply_text(
@@ -2990,11 +2997,7 @@ async def show_comments_directly(update: Update, context: ContextTypes.DEFAULT_T
     )
     
     # Send each comment as a separate message
-    for comment_index, comment_data in enumerate(comments_data):
-        # Use unified comment formatting function
-        formatted_comment = format_comment_display(comment_data, user_id, current_page, comment_index)
-        
-        # Send the comment
+    for formatted_comment in comment_messages:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=formatted_comment['text'],
@@ -3132,7 +3135,10 @@ async def show_post_with_options(update: Update, context: ContextTypes.DEFAULT_T
     
     logger.info(f"Viewing post {post_id} with options")
     
-    post = get_post_by_id(post_id)
+    post, comment_count = await asyncio.gather(
+        AsyncDBWrapper.run_sync(get_post_by_id, post_id),
+        async_get_comment_count(post_id),
+    )
     logger.info(f"Post retrieved: length={len(post) if post else 0}")
     
     if not post or post[5] != 1:  # Check if approved (approved field is at index 5, value 1 = approved)
@@ -3145,7 +3151,6 @@ async def show_post_with_options(update: Update, context: ContextTypes.DEFAULT_T
     
     content = post[1]
     category = post[2]
-    comment_count = await async_get_comment_count(post_id)
     
     # CORRECT field positions based on actual database schema:
     # [14]=media_type, [15]=media_file_id, [17]=media_caption
@@ -3273,9 +3278,12 @@ async def see_comments_callback(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data['current_page'] = page
 
         logger.info(f"Getting paginated comments for post_id: {post_id}, page: {page}")
-        comments_flat, current_page, total_pages, total_comments = get_comments_paginated(post_id, page)
+        from comments import build_comments_page
+        comment_messages, current_page, total_pages, total_comments = await AsyncDBWrapper.run_sync(
+            build_comments_page, post_id, page, update.effective_user.id
+        )
         logger.info(
-            f"Retrieved comments: data={len(comments_flat) if comments_flat else 0}, current_page={current_page}, total_pages={total_pages}, total_comments={total_comments}"
+            f"Retrieved comments: data={len(comment_messages)}, current_page={current_page}, total_pages={total_pages}, total_comments={total_comments}"
         )
     except Exception as e:
         logger.error(f"Error in see_comments_callback: {e}")
@@ -3290,7 +3298,7 @@ async def see_comments_callback(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception:
         pass
 
-    if not comments_flat:
+    if not comment_messages:
         keyboard = [
             [InlineKeyboardButton("💬 Add Comment", callback_data=f"add_comment_{post_id}")],
             [InlineKeyboardButton("🔙 Back to Post", callback_data=f"view_post_{post_id}")],
@@ -3306,8 +3314,6 @@ async def see_comments_callback(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
 
-    user_id = update.effective_user.id
-
     # Send header message using unified formatting
     header_text = format_comments_header(total_comments, current_page, total_pages)
     await context.bot.send_message(
@@ -3316,14 +3322,6 @@ async def see_comments_callback(update: Update, context: ContextTypes.DEFAULT_TY
         parse_mode="HTML"
     )
 
-    # OPTIMIZATION: Batch send comments to reduce network round trips
-    comment_messages = []
-    for comment_index, item in enumerate(comments_flat):
-        # Use unified comment formatting function
-        formatted_comment = format_comment_display(item, user_id, current_page, comment_index)
-        comment_messages.append(formatted_comment)
-    
-    # Send all comments with small delays to avoid rate limiting
     for i, formatted_comment in enumerate(comment_messages):
         try:
             await context.bot.send_message(
@@ -3333,9 +3331,6 @@ async def see_comments_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 parse_mode=formatted_comment['parse_mode'],
                 disable_web_page_preview=True
             )
-            # Small delay between messages to avoid rate limiting but keep it responsive
-            if i < len(comment_messages) - 1:  # Don't delay after the last message
-                await asyncio.sleep(0.05)  # 50ms delay
         except Exception as e:
             logger.error(f"Error sending comment {i}: {e}")
             # Continue with other comments even if one fails
@@ -3373,6 +3368,66 @@ async def see_comments_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 
+def rebuild_reaction_markup(markup, comment_id, likes, dislikes, user_reaction):
+    """Return the comment's keyboard with only the like/dislike buttons refreshed."""
+    like_emoji = "👍✅" if user_reaction == "like" else "👍"
+    dislike_emoji = "👎✅" if user_reaction == "dislike" else "👎"
+    like_button = InlineKeyboardButton(f"{like_emoji} {likes}", callback_data=f"like_comment_{comment_id}")
+    dislike_button = InlineKeyboardButton(f"{dislike_emoji} {dislikes}", callback_data=f"dislike_comment_{comment_id}")
+
+    if markup is None:
+        return InlineKeyboardMarkup([
+            [like_button, dislike_button],
+            [
+                InlineKeyboardButton("💬 Reply", callback_data=f"reply_comment_{comment_id}"),
+                InlineKeyboardButton("⚠️ Report", callback_data=f"report_comment_{comment_id}"),
+            ],
+        ])
+
+    rows = []
+    for row in markup.inline_keyboard:
+        new_row = []
+        for button in row:
+            if button.callback_data == f"like_comment_{comment_id}":
+                new_row.append(like_button)
+            elif button.callback_data == f"dislike_comment_{comment_id}":
+                new_row.append(dislike_button)
+            else:
+                new_row.append(button)
+        rows.append(new_row)
+    return InlineKeyboardMarkup(rows)
+
+
+async def handle_comment_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE, comment_id: int, reaction_type: str):
+    """Apply a like/dislike and refresh just the reaction buttons on the comment."""
+    query = update.callback_query
+    user_id = update.effective_user.id
+
+    from comments import react_to_comment_with_points
+    success, action, likes, dislikes = await react_to_comment_with_points(
+        user_id, comment_id, reaction_type, context
+    )
+
+    if not success:
+        await query.answer(f"❗ Error saving your {reaction_type}")
+        return
+
+    user_reaction = None if action == "removed" else reaction_type
+    try:
+        await query.edit_message_reply_markup(
+            reply_markup=rebuild_reaction_markup(
+                query.message.reply_markup, comment_id, likes, dislikes, user_reaction
+            )
+        )
+    except Exception as e:
+        logger.error(f"Error updating reaction buttons for comment {comment_id}: {e}")
+
+    emoji = "👍" if reaction_type == "like" else "👎"
+    count = likes if reaction_type == "like" else dislikes
+    wording = {"added": "saved", "removed": "removed", "changed": "updated"}.get(action, "saved")
+    await query.answer(f"{emoji} Reaction {wording}! ({count})")
+
+
 async def add_comment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle add comment callback"""
     query = update.callback_query
@@ -3382,7 +3437,7 @@ async def add_comment_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     
     # Validate that the post exists and is approved before allowing comment entry
     from comments import get_post_with_channel_info
-    post_info = get_post_with_channel_info(post_id)
+    post_info = await AsyncDBWrapper.run_sync(get_post_with_channel_info, post_id)
     
     if not post_info:
         await query.edit_message_text(
@@ -5144,224 +5199,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Like comment
     if data.startswith("like_comment_"):
         comment_id = int(data.replace("like_comment_", ""))
-        # Import the new function that awards points
-        from comments import react_to_comment_with_points
-        success, action, likes, dislikes = await react_to_comment_with_points(user_id, comment_id, "like", context)
-        
-        if success:
-            # Update the current message with new reaction counts
-            comment = get_comment_by_id(comment_id)
-            if comment:
-                # Get updated reaction info
-                user_reaction = get_user_reaction(user_id, comment_id)
-                like_emoji = "👍✅" if user_reaction == "like" else "👍"
-                dislike_emoji = "👎✅" if user_reaction == "dislike" else "👎"
-                
-                # Get sequential number for display
-                sequential_number = get_comment_sequential_number(comment_id)
-                
-                # Check if this is a reply or main comment
-                formatted_date = format_date_only(comment[5])  # Get properly escaped date part
-                if comment[4]:  # parent_comment_id exists, so it's a reply
-                    comment_text = f"reply\\# {sequential_number}\n\n{escape_markdown_text(comment[3])}\n\n{formatted_date}"
-                else:
-                    comment_text = f"comment\\# {sequential_number}\n\n{escape_markdown_text(comment[3])}\n\n{formatted_date}"
-                
-                # Create updated keyboard - Always include Reply button for main comments and replies
-                if comment[4]:  # Reply - include reply button for second-level replies too
-                    updated_keyboard = [
-                        [
-                            InlineKeyboardButton(f"{like_emoji} {likes}", callback_data=f"like_comment_{comment_id}"),
-                            InlineKeyboardButton(f"{dislike_emoji} {dislikes}", callback_data=f"dislike_comment_{comment_id}"),
-                            InlineKeyboardButton("💬 Reply", callback_data=f"reply_comment_{comment_id}"),
-                            InlineKeyboardButton("⚠️ Report", callback_data=f"report_comment_{comment_id}")
-                        ]
-                    ]
-                else:  # Main comment
-                    updated_keyboard = [
-                        [
-                            InlineKeyboardButton(f"{like_emoji} {likes}", callback_data=f"like_comment_{comment_id}"),
-                            InlineKeyboardButton(f"{dislike_emoji} {dislikes}", callback_data=f"dislike_comment_{comment_id}"),
-                            InlineKeyboardButton("💬 Reply", callback_data=f"reply_comment_{comment_id}"),
-                            InlineKeyboardButton("⚠️ Report", callback_data=f"report_comment_{comment_id}")
-                        ]
-                    ]
-                
-                updated_reply_markup = InlineKeyboardMarkup(updated_keyboard)
-                
-                try:
-                    await query.edit_message_text(
-                        comment_text,
-                        reply_markup=updated_reply_markup,
-                        parse_mode="MarkdownV2"
-                    )
-                except Exception as e:
-                    logger.error(f"Error updating comment message: {e}")
-            
-            # Show feedback
-            if action == "added":
-                await query.answer(f"👍 Liked! ({likes})")
-            elif action == "removed":
-                await query.answer(f"👍 Like removed! ({likes})")
-            elif action == "changed":
-                await query.answer(f"👍 Changed to like! ({likes})")
-        else:
-            await query.answer("❗ Error liking comment")
-        return
-        
-        # Refresh the comments view by calling the function directly with proper data
-        comment = get_comment_by_id(comment_id)
-        if comment:
-            post_id = comment[1]
-            page = context.user_data.get('current_page', 1)
-            
-            # Call the comments display directly
-            try:
-                comments_data, current_page, total_pages, total_comments = get_comments_paginated(post_id, page)
-                
-                # Build and update the message with refreshed like/dislike counts
-                text = f"💬 *Comments \\({total_comments} total\\)*\n*Page {current_page} of {total_pages}*\n\n"
-                keyboard = []
-                
-                for comment_data in comments_data:
-                    comment = comment_data['comment']
-                    replies = comment_data['replies']
-                    total_replies = comment_data['total_replies']
-                    
-                    comment_id = comment[0]
-                    content = comment[1]
-                    timestamp = comment[2]
-                    likes = comment[3]
-                    dislikes = comment[4]
-                    
-                    # Format comment with proper line spacing
-                    text += f"comment\\# {comment_id}\n\n"
-                    text += f"{escape_markdown_text(content)}\n\n"
-                    formatted_date = format_date_only(timestamp)  # Get properly escaped date part
-                    text += f"{formatted_date}\n"
-                    
-                    # Add replies if any
-                    if replies:
-                        for reply in replies:
-                            reply_content = reply[1]
-                            text += f"↳ {escape_markdown_text(truncate_text(reply_content, 60))}\n"
-                    
-                    if total_replies > len(replies):
-                        text += f"↳ \\.\\.\\.\\.\\. and {total_replies - len(replies)} more replies\n"
-                    
-                    text += "\n"
-                    
-                    # Add reaction buttons for this comment immediately after it
-                    comment_row = [
-                        InlineKeyboardButton("👍", callback_data=f"like_comment_{comment_id}"),
-                        InlineKeyboardButton("👎", callback_data=f"dislike_comment_{comment_id}"),
-                        InlineKeyboardButton("💬", callback_data=f"reply_comment_{comment_id}"),
-                        InlineKeyboardButton("⚠️", callback_data=f"report_comment_{comment_id}")
-                    ]
-                    keyboard.append(comment_row)
-                    
-                    # Add a separator row between comments (except for the last one)
-                    if comment_data != comments_data[-1]:
-                        keyboard.append([InlineKeyboardButton("─────", callback_data="separator")])
-                
-                # Navigation buttons
-                nav_buttons = []
-                if current_page > 1:
-                    nav_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"see_comments_{post_id}_{current_page-1}"))
-                if current_page < total_pages:
-                    nav_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"see_comments_{post_id}_{current_page+1}"))
-                
-                if nav_buttons:
-                    keyboard.append(nav_buttons)
-                
-                # Action buttons
-                keyboard.append([
-                    InlineKeyboardButton("💬 Add Comment", callback_data=f"add_comment_{post_id}"),
-                    InlineKeyboardButton("🔙 Back to Post", callback_data=f"view_post_{post_id}")
-                ])
-                keyboard.append([InlineKeyboardButton("🏠 Main Menu", callback_data="menu")])
-                
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                await query.edit_message_text(
-                    text,
-                    reply_markup=reply_markup,
-                    parse_mode="MarkdownV2"
-                )
-            except Exception as e:
-                logger.error(f"Error refreshing comments view: {e}")
+        await handle_comment_reaction(update, context, comment_id, "like")
         return
     
     # Dislike comment
     if data.startswith("dislike_comment_"):
         comment_id = int(data.replace("dislike_comment_", ""))
-        # Import the new function that awards points
-        from comments import react_to_comment_with_points
-        success, action, likes, dislikes = await react_to_comment_with_points(user_id, comment_id, "dislike", context)
-        
-        if success:
-            # Update the current message with new reaction counts
-            comment = get_comment_by_id(comment_id)
-            if comment:
-                # Get updated reaction info
-                user_reaction = get_user_reaction(user_id, comment_id)
-                like_emoji = "👍✅" if user_reaction == "like" else "👍"
-                dislike_emoji = "👎✅" if user_reaction == "dislike" else "👎"
-                
-                # Get sequential number for display
-                sequential_number = get_comment_sequential_number(comment_id)
-                
-                # Check if this is a reply or main comment
-                formatted_date = format_date_only(comment[5])  # Get properly escaped date part
-                if comment[4]:  # parent_comment_id exists, so it's a reply
-                    comment_text = f"reply\\# {sequential_number}\n\n{escape_markdown_text(comment[3])}\n\n{formatted_date}"
-                else:
-                    comment_text = f"comment\\# {sequential_number}\n\n{escape_markdown_text(comment[3])}\n\n{formatted_date}"
-                
-                # Create updated keyboard - Always include Reply button for main comments and replies
-                if comment[4]:  # Reply - include reply button for second-level replies too
-                    updated_keyboard = [
-                        [
-                            InlineKeyboardButton(f"{like_emoji} {likes}", callback_data=f"like_comment_{comment_id}"),
-                            InlineKeyboardButton(f"{dislike_emoji} {dislikes}", callback_data=f"dislike_comment_{comment_id}"),
-                            InlineKeyboardButton("💬 Reply", callback_data=f"reply_comment_{comment_id}"),
-                            InlineKeyboardButton("⚠️ Report", callback_data=f"report_comment_{comment_id}")
-                        ]
-                    ]
-                else:  # Main comment
-                    updated_keyboard = [
-                        [
-                            InlineKeyboardButton(f"{like_emoji} {likes}", callback_data=f"like_comment_{comment_id}"),
-                            InlineKeyboardButton(f"{dislike_emoji} {dislikes}", callback_data=f"dislike_comment_{comment_id}"),
-                            InlineKeyboardButton("💬 Reply", callback_data=f"reply_comment_{comment_id}"),
-                            InlineKeyboardButton("⚠️ Report", callback_data=f"report_comment_{comment_id}")
-                        ]
-                    ]
-                
-                updated_reply_markup = InlineKeyboardMarkup(updated_keyboard)
-                
-                try:
-                    await query.edit_message_text(
-                        comment_text,
-                        reply_markup=updated_reply_markup,
-                        parse_mode="MarkdownV2"
-                    )
-                except Exception as e:
-                    logger.error(f"Error updating comment message: {e}")
-            
-            # Show feedback
-            if action == "added":
-                await query.answer(f"👎 Disliked! ({dislikes})")
-            elif action == "removed":
-                await query.answer(f"👎 Dislike removed! ({dislikes})")
-            elif action == "changed":
-                await query.answer(f"👎 Changed to dislike! ({dislikes})")
+        await handle_comment_reaction(update, context, comment_id, "dislike")
+        return
 
     
     # Reply to comment
     if data.startswith("reply_comment_"):
         comment_id = int(data.replace("reply_comment_", ""))
-        comment = get_comment_by_id(comment_id)
+        comment, sequential_number = await asyncio.gather(
+            AsyncDBWrapper.run_sync(get_comment_by_id, comment_id),
+            AsyncDBWrapper.run_sync(get_comment_sequential_number, comment_id),
+        )
         
         if comment:
             post_id = comment[1]
@@ -5370,9 +5224,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['state'] = 'writing_comment'
             
             comment_preview = truncate_text(comment[3], 100)
-            
-            # Get sequential number for display
-            sequential_number = get_comment_sequential_number(comment_id)
             
             # Create cancel button for the reply interface
             reply_cancel_keyboard = [[InlineKeyboardButton("🚫 Cancel", callback_data="cancel_to_menu")]]

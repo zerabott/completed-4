@@ -896,7 +896,7 @@ async def handle_profile_text_input(update: Update, context: ContextTypes.DEFAUL
         ]
 
         await update.message.reply_text(
-            "🔹 *Emoji (optional)*\\n\\n"
+            "🔹 *Emoji (optional)*\n\n"
             "Send 1–2 emoji to show next to your name, or tap one below, or type `skip` to continue without an emoji\\.",
             parse_mode="MarkdownV2",
             reply_markup=ReplyKeyboardMarkup(emoji_keyboard, resize_keyboard=True, one_time_keyboard=True),
@@ -1337,7 +1337,7 @@ async def handle_profile_chat_message(update: Update, context: ContextTypes.DEFA
     # Only text messages are supported for now
     if not update.message.text:
         await update.message.reply_text(
-            "❗ Currently only text messages are supported in profile chats\\\\.\\n"
+            "❗ Currently only text messages are supported in profile chats\\\\.\n"
             "Please send a text message, or use the main menu to exit\\\\."
         )
         return
@@ -4275,7 +4275,7 @@ async def handle_profile_contact_request(update: Update, context: ContextTypes.D
     if not target_profile or not target_profile.get('is_active'):
         logger.info(f"Target profile not available or not active for user {target_user_id}")
         await query.edit_message_text(
-            "👤 *Profile not available*\\!\\n\\nThis user is not currently accepting contacts\\.",
+            "👤 *Profile not available*\\!\n\nThis user is not currently accepting contacts\\.",
             parse_mode="MarkdownV2",
         )
         return
@@ -4284,7 +4284,7 @@ async def handle_profile_contact_request(update: Update, context: ContextTypes.D
     if not target_profile.get('accepting_contacts', True):
         logger.info(f"Target user {target_user_id} is not accepting contact requests")
         await query.edit_message_text(
-            "🚫 *Contact requests disabled*\\n\\nThis user is not currently accepting new contact requests\\.",
+            "🚫 *Contact requests disabled*\n\nThis user is not currently accepting new contact requests\\.",
             parse_mode="MarkdownV2",
         )
         return
@@ -4292,7 +4292,7 @@ async def handle_profile_contact_request(update: Update, context: ContextTypes.D
     if not requester_profile or not requester_profile.get('is_active'):
         logger.info(f"Requester profile not available or not active for user {user_id}")
         await query.edit_message_text(
-            "👤 *Profile required*\\n\\nCreate and enable your profile first using '👤 My Profile' in the main menu\\.",
+            "👤 *Profile required*\n\nCreate and enable your profile first using '👤 My Profile' in the main menu\\.",
             parse_mode="MarkdownV2",
         )
         return
@@ -4315,7 +4315,7 @@ async def handle_profile_contact_request(update: Update, context: ContextTypes.D
             context.user_data['profile_chat_partner'] = target_user_id
             context.user_data['profile_contact_id'] = contact['id']
             await query.edit_message_text(
-                "✅ *Chat already active*\\!\\n\\nSend messages here and I'll relay them\\.",
+                "✅ *Chat already active*\\!\n\nSend messages here and I'll relay them\\.",
                 parse_mode="MarkdownV2",
             )
             return
@@ -4593,7 +4593,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         blocked_id = int(data.replace("unblock_user_", ""))
         unblock_profile_user(user_id, blocked_id)
         await query.edit_message_text(
-            "✅ *User Unblocked*\\n\\n"
+            "✅ *User Unblocked*\n\n"
             "This user has been unblocked and can now contact you again\\.",
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup([[
@@ -4704,8 +4704,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 await query.answer("You can now reply to this message")
                 await query.edit_message_text(
-                    "↩️ *Reply Mode Activated*\\n\\n"
-                    "Send your reply message below\\.\\n\\n"
+                    "↩️ *Reply Mode Activated*\n\n"
+                    "Send your reply message below\\.\n\n"
                     "Use the chat controls when you're done\\.",
                     parse_mode="MarkdownV2",
                 )
@@ -4771,7 +4771,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['profile_state'] = 'editing_name_only'
             context.user_data['state'] = 'profile_editing'
             await query.edit_message_text(
-                "✏️ *Edit Name*\\n\\nSend your new display name \\(2–32 characters\\):",
+                "✏️ *Edit Name*\n\nSend your new display name \\(2–32 characters\\):",
                 parse_mode="MarkdownV2",
             )
             return
@@ -4804,7 +4804,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Remove the emoji selection keyboard
             await query.edit_message_text(
-                "💬 *Short Bio*\\n\\n"
+                "💬 *Short Bio*\n\n"
                 "Send a short bio \\(up to 250 characters\\) describing yourself, or type `skip` to leave it empty\\.",
                 parse_mode="MarkdownV2"
             )
@@ -4813,7 +4813,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['profile_state'] = 'editing_bio_only'
             context.user_data['state'] = 'profile_editing'
             await query.edit_message_text(
-                "💬 *Edit Bio*\\n\\nSend your new bio \\(up to 250 characters\\) or type `skip` to leave it empty:\\.",
+                "💬 *Edit Bio*\n\nSend your new bio \\(up to 250 characters\\) or type `skip` to leave it empty:\\.",
                 parse_mode="MarkdownV2",
             )
             return
@@ -4835,7 +4835,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['profile_state'] = 'editing_age'
             context.user_data['state'] = 'profile_editing'
             await query.edit_message_text(
-                "🎂 *Edit Age*\\n\\nSend your age \\(number only\\) or type `skip` to leave it empty:\\.",
+                "🎂 *Edit Age*\n\nSend your age \\(number only\\) or type `skip` to leave it empty:\\.",
                 parse_mode="MarkdownV2",
             )
             return
@@ -4844,7 +4844,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['profile_state'] = 'editing_department'
             context.user_data['state'] = 'profile_editing'
             await query.edit_message_text(
-                "🎓 *Edit Department*\\n\\nSend your department/field of study or type `skip` to leave it empty:\\.",
+                "🎓 *Edit Department*\n\nSend your department/field of study or type `skip` to leave it empty:\\.",
                 parse_mode="MarkdownV2",
             )
             return
@@ -4861,7 +4861,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['profile_state'] = 'editing_religion'
             context.user_data['state'] = 'profile_editing'
             await query.edit_message_text(
-                "🕌 *Edit Religion*\\n\\nSend your religion or type `skip` to leave it empty:\\.",
+                "🕌 *Edit Religion*\n\nSend your religion or type `skip` to leave it empty:\\.",
                 parse_mode="MarkdownV2",
             )
             return
@@ -4878,7 +4878,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['profile_state'] = 'editing_other_info'
             context.user_data['state'] = 'profile_editing'
             await query.edit_message_text(
-                "📝 *Edit Other Info*\\n\\nSend any other information about yourself or type `skip` to leave it empty:\\.",
+                "📝 *Edit Other Info*\n\nSend any other information about yourself or type `skip` to leave it empty:\\.",
                 parse_mode="MarkdownV2",
             )
             return
@@ -4917,7 +4917,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if contact:
                 update_profile_contact_status(contact_id, 'ended')
                 await query.edit_message_text(
-                    "💔 *Friend Removed*\\n\\n"
+                    "💔 *Friend Removed*\n\n"
                     "This user has been removed from your friends list\\.",
                     parse_mode="MarkdownV2",
                     reply_markup=InlineKeyboardMarkup([[
@@ -4947,7 +4947,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 block_profile_user(user_id, requester_id)
                 update_profile_contact_status(contact_id, 'declined')
                 await query.edit_message_text(
-                    "🚫 *User Blocked*\\n\\n"
+                    "🚫 *User Blocked*\n\n"
                     "This user has been blocked and the request declined\\.",
                     parse_mode="MarkdownV2",
                     reply_markup=InlineKeyboardMarkup([[
@@ -5020,8 +5020,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔙 Back", callback_data="menu")],
             ]
             await query.edit_message_text(
-                "⚠️ *Delete Profile*\\n\\n"
-                "This will remove your profile and hide your name from future posts and comments\\.\\n\\n"
+                "⚠️ *Delete Profile*\n\n"
+                "This will remove your profile and hide your name from future posts and comments\\.\n\n"
                 "Are you sure?",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="MarkdownV2",
@@ -5036,7 +5036,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data.pop('profile_draft', None)
                 context.user_data.pop('state', None)
                 await query.edit_message_text(
-                    "✅ *Profile deleted*\\n\\nYou can always create a new one later from the menu\\.",
+                    "✅ *Profile deleted*\n\nYou can always create a new one later from the menu\\.",
                     parse_mode="MarkdownV2",
                 )
             else:
@@ -5078,7 +5078,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['profile_state'] = 'editing_name'
             context.user_data['state'] = 'profile_editing'
             await query.edit_message_text(
-                "✅ *Chat already active*\\!\\n\\nSend messages here and I'll relay them\\.",
+                "✅ *Chat already active*\\!\n\nSend messages here and I'll relay them\\.",
                 parse_mode="MarkdownV2",
             )
             return
@@ -5086,7 +5086,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Update profile name
         if query.data == "update_profile_name":
             await query.edit_message_text(
-                "✏️ *Update Profile Name*\\n\\nSend your new display name \\(2–32 characters\\):",
+                "✏️ *Update Profile Name*\n\nSend your new display name \\(2–32 characters\\):",
                 parse_mode="MarkdownV2",
             )
             return
@@ -5750,12 +5750,12 @@ Select a category below:
             if success:
                 await query.answer("✅ Comment replaced with removal notice")
                 await query.edit_message_text(
-                    f"✅ **Comment Replaced Successfully**\\n\\n"
+                    f"✅ **Comment Replaced Successfully**\n\n"
                     f"**Comment \\#{comment_id}** has been replaced with a removal notice\\."
-                    f"\\n\\n**Statistics:**\\n"
-                    f"• Comments replaced: {replacement_stats['comments_replaced']}\\n"
-                    f"• Replies replaced: {replacement_stats['replies_replaced']}\\n"
-                    f"• Reports cleared: {replacement_stats['reports_cleared']}\\n\\n"
+                    f"\n\n**Statistics:**\n"
+                    f"• Comments replaced: {replacement_stats['comments_replaced']}\n"
+                    f"• Replies replaced: {replacement_stats['replies_replaced']}\n"
+                    f"• Reports cleared: {replacement_stats['reports_cleared']}\n\n"
                     f"The comment structure has been preserved while hiding inappropriate content\\.",
                     parse_mode="MarkdownV2"
                 )
@@ -5763,8 +5763,8 @@ Select a category below:
                 error_message = replacement_stats.get('error', 'Unknown error')
                 await query.answer("❗ Failed to replace comment")
                 await query.edit_message_text(
-                    f"❗ **Failed to replace comment \\#{comment_id}**\\n\\n"
-                    f"Error: {escape_markdown_text(error_message)}\\n\\n"
+                    f"❗ **Failed to replace comment \\#{comment_id}**\n\n"
+                    f"Error: {escape_markdown_text(error_message)}\n\n"
                     f"Please try again or contact system administrator\\.",
                     parse_mode="MarkdownV2"
                 )

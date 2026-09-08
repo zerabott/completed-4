@@ -7,6 +7,7 @@ import logging
 import re
 import os
 import asyncio
+import functools
 from typing import Optional
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
@@ -46,7 +47,7 @@ from db import (
     async_increment_user_questions,
     async_increment_user_comments
 )
-from db_connection import get_db_connection, cache_manager, make_async
+from db_connection import get_db_connection, cache_manager, make_async, AsyncDBWrapper
 from submission import *
 from submission import validate_media, validate_caption, get_media_type_emoji
 from comments import *
@@ -896,7 +897,7 @@ async def handle_profile_text_input(update: Update, context: ContextTypes.DEFAUL
         ]
 
         await update.message.reply_text(
-            "🔹 *Emoji (optional)*\\n\\n"
+            "🔹 *Emoji (optional)*\n\n"
             "Send 1–2 emoji to show next to your name, or tap one below, or type `skip` to continue without an emoji\\.",
             parse_mode="MarkdownV2",
             reply_markup=ReplyKeyboardMarkup(emoji_keyboard, resize_keyboard=True, one_time_keyboard=True),
@@ -1138,6 +1139,11 @@ async def handle_profile_text_input(update: Update, context: ContextTypes.DEFAUL
         return
 
 
+async def _resolved(value):
+    """Awaitable placeholder so a skipped lookup can take part in asyncio.gather."""
+    return value
+
+
 async def show_profile_card(update: Update, context: ContextTypes.DEFAULT_TYPE, profile_user_id: int, back_to_request_contact_id: Optional[int] = None):
     """Show a user's profile card with contact/block options.
     
@@ -1151,7 +1157,27 @@ async def show_profile_card(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     
     viewer_id = update.effective_user.id if update.effective_user else None
 
-    profile = get_user_profile(profile_user_id)
+    from ranking_integration import ranking_manager
+
+    checks_block = bool(viewer_id and viewer_id != profile_user_id)
+    profile, stats, user_rank, is_blocked = await asyncio.gather(
+        AsyncDBWrapper.run_sync(get_user_profile, profile_user_id),
+        AsyncDBWrapper.run_sync(get_user_profile_stats, profile_user_id),
+        AsyncDBWrapper.run_sync(ranking_manager.get_user_rank, profile_user_id),
+        AsyncDBWrapper.run_sync(is_profile_blocked_either_way, viewer_id, profile_user_id)
+        if checks_block else _resolved(False),
+        return_exceptions=True,
+    )
+
+    for label, value in (
+        ("profile", profile), ("stats", stats),
+        ("rank info", user_rank), ("profile blocks", is_blocked),
+    ):
+        if isinstance(value, Exception):
+            logger.error(f"Error fetching {label} for {profile_user_id}: {value}")
+
+    if isinstance(profile, Exception):
+        profile = None
     if not profile or not profile.get('is_active'):
         # Simple HTML message when profile is not available
         text = (
@@ -1202,12 +1228,10 @@ async def show_profile_card(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         details_lines.append(f"Other Info: {html_escape(short_other)}")
 
     # Basic stats for the profile owner
-    try:
-        stats = get_user_profile_stats(profile_user_id)
+    if isinstance(stats, dict):
         conf_count = stats.get('confessions', 0)
         comm_count = stats.get('comments', 0)
-    except Exception as e:
-        logger.error(f"Error fetching profile stats for {profile_user_id}: {e}")
+    else:
         conf_count = comm_count = 0
 
     conf_count_str = html_escape(str(conf_count))
@@ -1215,24 +1239,18 @@ async def show_profile_card(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     
     # Get user's rank information
     rank_info = ""
-    try:
-        from ranking_integration import ranking_manager
-        user_rank = ranking_manager.get_user_rank(profile_user_id)
-        if user_rank:
-            rank_emoji = user_rank.rank_emoji
-            rank_name = user_rank.rank_name
-            total_points = user_rank.total_points
-            
-            # Format rank with special styling for special ranks
-            if user_rank.is_special_rank:
-                rank_info = f"✨ {rank_emoji} <b>{html_escape(rank_name)}</b> ✨\n"
-                rank_info += f"💎 <b>{html_escape(str(total_points))}</b> points\n"
-            else:
-                rank_info = f"{rank_emoji} <b>{html_escape(rank_name)}</b>\n"
-                rank_info += f"💎 <b>{html_escape(str(total_points))}</b> points\n"
-    except Exception as e:
-        logger.error(f"Error fetching rank info for {profile_user_id}: {e}")
-        rank_info = ""
+    if user_rank and not isinstance(user_rank, Exception):
+        rank_emoji = user_rank.rank_emoji
+        rank_name = user_rank.rank_name
+        total_points = user_rank.total_points
+        
+        # Format rank with special styling for special ranks
+        if user_rank.is_special_rank:
+            rank_info = f"✨ {rank_emoji} <b>{html_escape(rank_name)}</b> ✨\n"
+            rank_info += f"💎 <b>{html_escape(str(total_points))}</b> points\n"
+        else:
+            rank_info = f"{rank_emoji} <b>{html_escape(rank_name)}</b>\n"
+            rank_info += f"💎 <b>{html_escape(str(total_points))}</b> points\n"
 
     lines = [
         "<b>👤 User Profile</b>",
@@ -1272,12 +1290,7 @@ async def show_profile_card(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         # Normal profile view - show all buttons
         if viewer_id and viewer_id != profile_user_id:
             # Check if contact is allowed
-            can_contact = True
-            try:
-                if is_profile_blocked_either_way(viewer_id, profile_user_id):
-                    can_contact = False
-            except Exception as e:
-                logger.error(f"Error checking profile blocks between {viewer_id} and {profile_user_id}: {e}")
+            can_contact = not (is_blocked is True)
             if can_contact and profile.get('is_active'):
                 buttons.append([InlineKeyboardButton("💬 Contact", callback_data=f"profile_contact_{profile_user_id}")])
             buttons.append([InlineKeyboardButton("🚫 Block user", callback_data=f"profile_block_{profile_user_id}")])
@@ -1325,7 +1338,7 @@ async def handle_profile_chat_message(update: Update, context: ContextTypes.DEFA
     # Only text messages are supported for now
     if not update.message.text:
         await update.message.reply_text(
-            "❗ Currently only text messages are supported in profile chats\\\\.\\n"
+            "❗ Currently only text messages are supported in profile chats\\\\.\n"
             "Please send a text message, or use the main menu to exit\\\\."
         )
         return
@@ -1376,7 +1389,26 @@ async def handle_profile_chat_message(update: Update, context: ContextTypes.DEFA
         return
 
     # Verify contact is still active and not blocked
-    contact = get_profile_contact_by_id(contact_id)
+    contact, is_blocked, daily_count, sender_profile = await asyncio.gather(
+        AsyncDBWrapper.run_sync(get_profile_contact_by_id, contact_id),
+        AsyncDBWrapper.run_sync(is_profile_blocked_either_way, user_id, partner_id),
+        AsyncDBWrapper.run_sync(get_user_daily_message_count, user_id),
+        AsyncDBWrapper.run_sync(get_user_profile, user_id),
+        return_exceptions=True,
+    )
+
+    for label, value in (
+        ("contact", contact), ("blocks", is_blocked),
+        ("daily message count", daily_count), ("sender profile", sender_profile),
+    ):
+        if isinstance(value, Exception):
+            logger.error(f"Error fetching {label} for profile chat {contact_id}: {value}")
+
+    if isinstance(contact, Exception):
+        contact = None
+    if isinstance(sender_profile, Exception):
+        sender_profile = None
+
     if not contact or contact.get('status') != 'active':
         await update.message.reply_text(
             "❗ This chat has ended\\\\. You can send a new request from the user's profile\\\\."
@@ -1385,7 +1417,7 @@ async def handle_profile_chat_message(update: Update, context: ContextTypes.DEFA
         context.user_data.pop('reply_mode_active', None)
         return
 
-    if is_profile_blocked_either_way(user_id, partner_id):
+    if is_blocked is True:
         await update.message.reply_text(
             "🚫 This chat is no longer available\\\\."
         )
@@ -1394,7 +1426,7 @@ async def handle_profile_chat_message(update: Update, context: ContextTypes.DEFA
         return
 
     # Check if user has exceeded daily message limit (10 messages per day)
-    if get_user_daily_message_count(user_id) >= 20:
+    if isinstance(daily_count, int) and daily_count >= 20:
         await update.message.reply_text(
             "❗ You've reached your daily message limit \\(10 messages per day\\)\\.\n"
             "Please try again tomorrow\\."
@@ -1410,12 +1442,11 @@ async def handle_profile_chat_message(update: Update, context: ContextTypes.DEFA
         return
 
     # Increment message count for the user
-    increment_user_daily_message_count(user_id)
+    await AsyncDBWrapper.run_sync(increment_user_daily_message_count, user_id)
 
     # Disable reply mode after sending a message
     context.user_data['reply_mode_active'] = False
 
-    sender_profile = get_user_profile(user_id)
     if sender_profile:
         name_raw = (sender_profile.get('emoji') or '') + ' ' + (sender_profile.get('display_name') or '')
         name_line = escape_markdown_text(name_raw.strip() if name_raw.strip() else "Anonymous")
@@ -1456,7 +1487,7 @@ async def handle_profile_chat_message(update: Update, context: ContextTypes.DEFA
         return
 
     try:
-        touch_profile_contact(contact_id)
+        await AsyncDBWrapper.run_sync(touch_profile_contact, contact_id)
     except Exception as e:
         logger.error(f"Error touching profile contact {contact_id}: {e}")
 
@@ -1821,13 +1852,16 @@ async def handle_confession_submission(update: Update, context: ContextTypes.DEF
         return
     
     # Save submission with media info
-    post_id, error = save_submission(
-        user_id, 
-        content, 
-        category, 
-        media_type=media_type,
-        file_id=media_file_id,
-        caption=caption
+    post_id, error = await AsyncDBWrapper.run_sync(
+        functools.partial(
+            save_submission,
+            user_id,
+            content,
+            category,
+            media_type=media_type,
+            file_id=media_file_id,
+            caption=caption,
+        )
     )
     
     if error:
@@ -1837,8 +1871,10 @@ async def handle_confession_submission(update: Update, context: ContextTypes.DEF
     # Points will be awarded only after admin approval
     # await award_points_for_confession_submission(user_id, post_id, category, context)
     
-    # Send to admins for approval with media
-    await send_to_admins_for_approval(context, post_id, content, category, user_id, media_file_id, media_type)
+    # Admin approval requests don't block the submitter's confirmation
+    asyncio.create_task(
+        send_to_admins_for_approval(context, post_id, content, category, user_id, media_file_id, media_type)
+    )
     
     # Determine submission type for confirmation message
     submission_type = "confession"
@@ -2908,7 +2944,7 @@ async def show_comments_directly(update: Update, context: ContextTypes.DEFAULT_T
     """Show comments directly via deep link"""
     try:
         logger.info(f"show_comments_directly called with post_id: {post_id}")
-        post = get_post_by_id(post_id)
+        post = await AsyncDBWrapper.run_sync(get_post_by_id, post_id)
         logger.info(f"Retrieved post: {post}")
         
         if not post or post[5] != 1:  # Check if approved (approved field is at index 5, value 1 = approved)
@@ -2927,15 +2963,18 @@ async def show_comments_directly(update: Update, context: ContextTypes.DEFAULT_T
     # Show comments starting from page 1
     try:
         logger.info(f"Getting paginated comments for post_id: {post_id}")
-        comments_data, current_page, total_pages, total_comments = get_comments_paginated(post_id, 1)
-        logger.info(f"Retrieved comments: data={len(comments_data) if comments_data else 0}, current_page={current_page}, total_pages={total_pages}, total_comments={total_comments}")
+        from comments import build_comments_page
+        comment_messages, current_page, total_pages, total_comments = await AsyncDBWrapper.run_sync(
+            build_comments_page, post_id, 1, update.effective_user.id
+        )
+        logger.info(f"Retrieved comments: data={len(comment_messages)}, current_page={current_page}, total_pages={total_pages}, total_comments={total_comments}")
     except Exception as e:
         logger.error(f"Error getting paginated comments: {e}")
         await update.message.reply_text("❗ Sorry, there was an issue loading comments. Please try again.")
         await show_menu(update, context)
         return
     
-    if not comments_data:
+    if not comment_messages:
         keyboard = [
             [InlineKeyboardButton("💬 Add Comment", callback_data=f"add_comment_{post_id}")],
             [InlineKeyboardButton("🔙 Back to Post", callback_data=f"view_post_{post_id}")],
@@ -2950,8 +2989,6 @@ async def show_comments_directly(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
     
-    user_id = update.effective_user.id
-    
     # Send header message using unified formatting
     header_text = format_comments_header(total_comments, current_page, total_pages)
     await update.message.reply_text(
@@ -2960,11 +2997,7 @@ async def show_comments_directly(update: Update, context: ContextTypes.DEFAULT_T
     )
     
     # Send each comment as a separate message
-    for comment_index, comment_data in enumerate(comments_data):
-        # Use unified comment formatting function
-        formatted_comment = format_comment_display(comment_data, user_id, current_page, comment_index)
-        
-        # Send the comment
+    for formatted_comment in comment_messages:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=formatted_comment['text'],
@@ -3102,7 +3135,10 @@ async def show_post_with_options(update: Update, context: ContextTypes.DEFAULT_T
     
     logger.info(f"Viewing post {post_id} with options")
     
-    post = get_post_by_id(post_id)
+    post, comment_count = await asyncio.gather(
+        AsyncDBWrapper.run_sync(get_post_by_id, post_id),
+        async_get_comment_count(post_id),
+    )
     logger.info(f"Post retrieved: length={len(post) if post else 0}")
     
     if not post or post[5] != 1:  # Check if approved (approved field is at index 5, value 1 = approved)
@@ -3115,7 +3151,6 @@ async def show_post_with_options(update: Update, context: ContextTypes.DEFAULT_T
     
     content = post[1]
     category = post[2]
-    comment_count = await async_get_comment_count(post_id)
     
     # CORRECT field positions based on actual database schema:
     # [14]=media_type, [15]=media_file_id, [17]=media_caption
@@ -3243,9 +3278,12 @@ async def see_comments_callback(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data['current_page'] = page
 
         logger.info(f"Getting paginated comments for post_id: {post_id}, page: {page}")
-        comments_flat, current_page, total_pages, total_comments = get_comments_paginated(post_id, page)
+        from comments import build_comments_page
+        comment_messages, current_page, total_pages, total_comments = await AsyncDBWrapper.run_sync(
+            build_comments_page, post_id, page, update.effective_user.id
+        )
         logger.info(
-            f"Retrieved comments: data={len(comments_flat) if comments_flat else 0}, current_page={current_page}, total_pages={total_pages}, total_comments={total_comments}"
+            f"Retrieved comments: data={len(comment_messages)}, current_page={current_page}, total_pages={total_pages}, total_comments={total_comments}"
         )
     except Exception as e:
         logger.error(f"Error in see_comments_callback: {e}")
@@ -3260,7 +3298,7 @@ async def see_comments_callback(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception:
         pass
 
-    if not comments_flat:
+    if not comment_messages:
         keyboard = [
             [InlineKeyboardButton("💬 Add Comment", callback_data=f"add_comment_{post_id}")],
             [InlineKeyboardButton("🔙 Back to Post", callback_data=f"view_post_{post_id}")],
@@ -3276,8 +3314,6 @@ async def see_comments_callback(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
 
-    user_id = update.effective_user.id
-
     # Send header message using unified formatting
     header_text = format_comments_header(total_comments, current_page, total_pages)
     await context.bot.send_message(
@@ -3286,14 +3322,6 @@ async def see_comments_callback(update: Update, context: ContextTypes.DEFAULT_TY
         parse_mode="HTML"
     )
 
-    # OPTIMIZATION: Batch send comments to reduce network round trips
-    comment_messages = []
-    for comment_index, item in enumerate(comments_flat):
-        # Use unified comment formatting function
-        formatted_comment = format_comment_display(item, user_id, current_page, comment_index)
-        comment_messages.append(formatted_comment)
-    
-    # Send all comments with small delays to avoid rate limiting
     for i, formatted_comment in enumerate(comment_messages):
         try:
             await context.bot.send_message(
@@ -3303,9 +3331,6 @@ async def see_comments_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 parse_mode=formatted_comment['parse_mode'],
                 disable_web_page_preview=True
             )
-            # Small delay between messages to avoid rate limiting but keep it responsive
-            if i < len(comment_messages) - 1:  # Don't delay after the last message
-                await asyncio.sleep(0.05)  # 50ms delay
         except Exception as e:
             logger.error(f"Error sending comment {i}: {e}")
             # Continue with other comments even if one fails
@@ -3343,6 +3368,66 @@ async def see_comments_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 
+def rebuild_reaction_markup(markup, comment_id, likes, dislikes, user_reaction):
+    """Return the comment's keyboard with only the like/dislike buttons refreshed."""
+    like_emoji = "👍✅" if user_reaction == "like" else "👍"
+    dislike_emoji = "👎✅" if user_reaction == "dislike" else "👎"
+    like_button = InlineKeyboardButton(f"{like_emoji} {likes}", callback_data=f"like_comment_{comment_id}")
+    dislike_button = InlineKeyboardButton(f"{dislike_emoji} {dislikes}", callback_data=f"dislike_comment_{comment_id}")
+
+    if markup is None:
+        return InlineKeyboardMarkup([
+            [like_button, dislike_button],
+            [
+                InlineKeyboardButton("💬 Reply", callback_data=f"reply_comment_{comment_id}"),
+                InlineKeyboardButton("⚠️ Report", callback_data=f"report_comment_{comment_id}"),
+            ],
+        ])
+
+    rows = []
+    for row in markup.inline_keyboard:
+        new_row = []
+        for button in row:
+            if button.callback_data == f"like_comment_{comment_id}":
+                new_row.append(like_button)
+            elif button.callback_data == f"dislike_comment_{comment_id}":
+                new_row.append(dislike_button)
+            else:
+                new_row.append(button)
+        rows.append(new_row)
+    return InlineKeyboardMarkup(rows)
+
+
+async def handle_comment_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE, comment_id: int, reaction_type: str):
+    """Apply a like/dislike and refresh just the reaction buttons on the comment."""
+    query = update.callback_query
+    user_id = update.effective_user.id
+
+    from comments import react_to_comment_with_points
+    success, action, likes, dislikes = await react_to_comment_with_points(
+        user_id, comment_id, reaction_type, context
+    )
+
+    if not success:
+        await query.answer(f"❗ Error saving your {reaction_type}")
+        return
+
+    user_reaction = None if action == "removed" else reaction_type
+    try:
+        await query.edit_message_reply_markup(
+            reply_markup=rebuild_reaction_markup(
+                query.message.reply_markup, comment_id, likes, dislikes, user_reaction
+            )
+        )
+    except Exception as e:
+        logger.error(f"Error updating reaction buttons for comment {comment_id}: {e}")
+
+    emoji = "👍" if reaction_type == "like" else "👎"
+    count = likes if reaction_type == "like" else dislikes
+    wording = {"added": "saved", "removed": "removed", "changed": "updated"}.get(action, "saved")
+    await query.answer(f"{emoji} Reaction {wording}! ({count})")
+
+
 async def add_comment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle add comment callback"""
     query = update.callback_query
@@ -3352,7 +3437,7 @@ async def add_comment_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     
     # Validate that the post exists and is approved before allowing comment entry
     from comments import get_post_with_channel_info
-    post_info = get_post_with_channel_info(post_id)
+    post_info = await AsyncDBWrapper.run_sync(get_post_with_channel_info, post_id)
     
     if not post_info:
         await query.edit_message_text(
@@ -4211,17 +4296,33 @@ async def handle_profile_contact_request(update: Update, context: ContextTypes.D
         await query.answer("You can't contact yourself\\.")
         return
 
-    # Respect blocks in either direction
-    try:
-        if is_profile_blocked_either_way(user_id, target_user_id):
-            logger.info(f"User {user_id} is blocked from contacting {target_user_id}")
-            await query.answer("You cannot contact this user\\.")
-            return
-    except Exception as e:
-        logger.error(f"Error checking blocks for contact request {user_id}->{target_user_id}: {e}")
+    is_blocked, requester_profile, target_profile, contact = await asyncio.gather(
+        AsyncDBWrapper.run_sync(is_profile_blocked_either_way, user_id, target_user_id),
+        AsyncDBWrapper.run_sync(get_user_profile, user_id),
+        AsyncDBWrapper.run_sync(get_user_profile, target_user_id),
+        AsyncDBWrapper.run_sync(get_profile_contact, user_id, target_user_id),
+        return_exceptions=True,
+    )
 
-    requester_profile = get_user_profile(user_id)
-    target_profile = get_user_profile(target_user_id)
+    for label, value in (
+        ("blocks", is_blocked), ("requester profile", requester_profile),
+        ("target profile", target_profile), ("existing contact", contact),
+    ):
+        if isinstance(value, Exception):
+            logger.error(f"Error fetching {label} for contact request {user_id}->{target_user_id}: {value}")
+
+    # Respect blocks in either direction
+    if is_blocked is True:
+        logger.info(f"User {user_id} is blocked from contacting {target_user_id}")
+        await query.answer("You cannot contact this user\\.")
+        return
+
+    if isinstance(requester_profile, Exception):
+        requester_profile = None
+    if isinstance(target_profile, Exception):
+        target_profile = None
+    if isinstance(contact, Exception):
+        contact = None
     
     logger.info(f"Requester profile: {requester_profile}")
     logger.info(f"Target profile: {target_profile}")
@@ -4229,7 +4330,7 @@ async def handle_profile_contact_request(update: Update, context: ContextTypes.D
     if not target_profile or not target_profile.get('is_active'):
         logger.info(f"Target profile not available or not active for user {target_user_id}")
         await query.edit_message_text(
-            "👤 *Profile not available*\\!\\n\\nThis user is not currently accepting contacts\\.",
+            "👤 *Profile not available*\\!\n\nThis user is not currently accepting contacts\\.",
             parse_mode="MarkdownV2",
         )
         return
@@ -4238,7 +4339,7 @@ async def handle_profile_contact_request(update: Update, context: ContextTypes.D
     if not target_profile.get('accepting_contacts', True):
         logger.info(f"Target user {target_user_id} is not accepting contact requests")
         await query.edit_message_text(
-            "🚫 *Contact requests disabled*\\n\\nThis user is not currently accepting new contact requests\\.",
+            "🚫 *Contact requests disabled*\n\nThis user is not currently accepting new contact requests\\.",
             parse_mode="MarkdownV2",
         )
         return
@@ -4246,12 +4347,11 @@ async def handle_profile_contact_request(update: Update, context: ContextTypes.D
     if not requester_profile or not requester_profile.get('is_active'):
         logger.info(f"Requester profile not available or not active for user {user_id}")
         await query.edit_message_text(
-            "👤 *Profile required*\\n\\nCreate and enable your profile first using '👤 My Profile' in the main menu\\.",
+            "👤 *Profile required*\n\nCreate and enable your profile first using '👤 My Profile' in the main menu\\.",
             parse_mode="MarkdownV2",
         )
         return
 
-    contact = get_profile_contact(user_id, target_user_id)
     if contact:
         status = contact.get('status')
         if status == 'pending':
@@ -4270,13 +4370,15 @@ async def handle_profile_contact_request(update: Update, context: ContextTypes.D
             context.user_data['profile_chat_partner'] = target_user_id
             context.user_data['profile_contact_id'] = contact['id']
             await query.edit_message_text(
-                "✅ *Chat already active*\\!\\n\\nSend messages here and I'll relay them\\.",
+                "✅ *Chat already active*\\!\n\nSend messages here and I'll relay them\\.",
                 parse_mode="MarkdownV2",
             )
             return
 
     # Create new pending contact
-    contact_id = create_profile_contact(user_id, target_user_id, initiator_id=user_id, status='pending')
+    contact_id = await AsyncDBWrapper.run_sync(
+        create_profile_contact, user_id, target_user_id, user_id, 'pending'
+    )
     
     logger.info(f"Created new contact request: contact_id={contact_id}")
 
@@ -4340,7 +4442,7 @@ async def handle_profile_contact_decision(update: Update, context: ContextTypes.
         return
     user_id = user.id
 
-    contact = get_profile_contact_by_id(contact_id)
+    contact = await AsyncDBWrapper.run_sync(get_profile_contact_by_id, contact_id)
     if not contact:
         await query.edit_message_text(
             "❗ This chat request is no longer available\\\\.",
@@ -4355,7 +4457,7 @@ async def handle_profile_contact_decision(update: Update, context: ContextTypes.
     partner_id = contact['user_a_id'] if contact['user_a_id'] != user_id else contact['user_b_id']
 
     if action == 'decline':
-        update_profile_contact_status(contact_id, 'ended')
+        await AsyncDBWrapper.run_sync(update_profile_contact_status, contact_id, 'ended')
         await query.edit_message_text(
             "❌ You declined this chat request\\.",
             parse_mode="MarkdownV2",
@@ -4371,8 +4473,8 @@ async def handle_profile_contact_decision(update: Update, context: ContextTypes.
         return
 
     if action == 'block':
-        block_profile_user(user_id, partner_id)
-        update_profile_contact_status(contact_id, 'ended')
+        await AsyncDBWrapper.run_sync(block_profile_user, user_id, partner_id)
+        await AsyncDBWrapper.run_sync(update_profile_contact_status, contact_id, 'ended')
         await query.edit_message_text(
             "🚫 You blocked this user\\. They won't be able to contact you through profiles\\.",
             parse_mode="MarkdownV2",
@@ -4388,7 +4490,7 @@ async def handle_profile_contact_decision(update: Update, context: ContextTypes.
         return
 
     if action == 'accept':
-        update_profile_contact_status(contact_id, 'active')
+        await AsyncDBWrapper.run_sync(update_profile_contact_status, contact_id, 'active')
         # Store mapping in bot_data for quick lookup
         sessions = context.bot_data.setdefault('profile_sessions', {})
         a_id, b_id = contact['user_a_id'], contact['user_b_id']
@@ -4403,8 +4505,10 @@ async def handle_profile_contact_decision(update: Update, context: ContextTypes.
         context.user_data['reply_mode_active'] = True
 
         try:
-            partner_profile = get_user_profile(partner_id)
-            viewer_profile = get_user_profile(user_id)
+            partner_profile, viewer_profile = await asyncio.gather(
+                AsyncDBWrapper.run_sync(get_user_profile, partner_id),
+                AsyncDBWrapper.run_sync(get_user_profile, user_id),
+            )
 
             def _display(p):
                 if not p:
@@ -4463,7 +4567,7 @@ async def handle_profile_chat_control(update: Update, context: ContextTypes.DEFA
         return
     user_id = user.id
 
-    contact = get_profile_contact_by_id(contact_id)
+    contact = await AsyncDBWrapper.run_sync(get_profile_contact_by_id, contact_id)
     if not contact:
         await query.edit_message_text(
             "❗ This chat is no longer available\\\\.",
@@ -4479,7 +4583,7 @@ async def handle_profile_chat_control(update: Update, context: ContextTypes.DEFA
     partner_id = contact['user_a_id'] if contact['user_a_id'] != user_id else contact['user_b_id']
 
     if action == 'end':
-        update_profile_contact_status(contact_id, 'ended')
+        await AsyncDBWrapper.run_sync(update_profile_contact_status, contact_id, 'ended')
         # Clear local chat state
         context.user_data.pop('state', None)
         context.user_data.pop('profile_chat_partner', None)
@@ -4499,8 +4603,8 @@ async def handle_profile_chat_control(update: Update, context: ContextTypes.DEFA
         return
 
     if action == 'block':
-        block_profile_user(user_id, partner_id)
-        update_profile_contact_status(contact_id, 'ended')
+        await AsyncDBWrapper.run_sync(block_profile_user, user_id, partner_id)
+        await AsyncDBWrapper.run_sync(update_profile_contact_status, contact_id, 'ended')
         context.user_data.pop('state', None)
         context.user_data.pop('profile_chat_partner', None)
         context.user_data.pop('profile_contact_id', None)
@@ -4544,7 +4648,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         blocked_id = int(data.replace("unblock_user_", ""))
         unblock_profile_user(user_id, blocked_id)
         await query.edit_message_text(
-            "✅ *User Unblocked*\\n\\n"
+            "✅ *User Unblocked*\n\n"
             "This user has been unblocked and can now contact you again\\.",
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup([[
@@ -4655,8 +4759,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 await query.answer("You can now reply to this message")
                 await query.edit_message_text(
-                    "↩️ *Reply Mode Activated*\\n\\n"
-                    "Send your reply message below\\.\\n\\n"
+                    "↩️ *Reply Mode Activated*\n\n"
+                    "Send your reply message below\\.\n\n"
                     "Use the chat controls when you're done\\.",
                     parse_mode="MarkdownV2",
                 )
@@ -4722,7 +4826,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['profile_state'] = 'editing_name_only'
             context.user_data['state'] = 'profile_editing'
             await query.edit_message_text(
-                "✏️ *Edit Name*\\n\\nSend your new display name \\(2–32 characters\\):",
+                "✏️ *Edit Name*\n\nSend your new display name \\(2–32 characters\\):",
                 parse_mode="MarkdownV2",
             )
             return
@@ -4755,7 +4859,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Remove the emoji selection keyboard
             await query.edit_message_text(
-                "💬 *Short Bio*\\n\\n"
+                "💬 *Short Bio*\n\n"
                 "Send a short bio \\(up to 250 characters\\) describing yourself, or type `skip` to leave it empty\\.",
                 parse_mode="MarkdownV2"
             )
@@ -4764,7 +4868,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['profile_state'] = 'editing_bio_only'
             context.user_data['state'] = 'profile_editing'
             await query.edit_message_text(
-                "💬 *Edit Bio*\\n\\nSend your new bio \\(up to 250 characters\\) or type `skip` to leave it empty:\\.",
+                "💬 *Edit Bio*\n\nSend your new bio \\(up to 250 characters\\) or type `skip` to leave it empty:\\.",
                 parse_mode="MarkdownV2",
             )
             return
@@ -4786,7 +4890,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['profile_state'] = 'editing_age'
             context.user_data['state'] = 'profile_editing'
             await query.edit_message_text(
-                "🎂 *Edit Age*\\n\\nSend your age \\(number only\\) or type `skip` to leave it empty:\\.",
+                "🎂 *Edit Age*\n\nSend your age \\(number only\\) or type `skip` to leave it empty:\\.",
                 parse_mode="MarkdownV2",
             )
             return
@@ -4795,7 +4899,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['profile_state'] = 'editing_department'
             context.user_data['state'] = 'profile_editing'
             await query.edit_message_text(
-                "🎓 *Edit Department*\\n\\nSend your department/field of study or type `skip` to leave it empty:\\.",
+                "🎓 *Edit Department*\n\nSend your department/field of study or type `skip` to leave it empty:\\.",
                 parse_mode="MarkdownV2",
             )
             return
@@ -4812,7 +4916,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['profile_state'] = 'editing_religion'
             context.user_data['state'] = 'profile_editing'
             await query.edit_message_text(
-                "🕌 *Edit Religion*\\n\\nSend your religion or type `skip` to leave it empty:\\.",
+                "🕌 *Edit Religion*\n\nSend your religion or type `skip` to leave it empty:\\.",
                 parse_mode="MarkdownV2",
             )
             return
@@ -4829,7 +4933,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['profile_state'] = 'editing_other_info'
             context.user_data['state'] = 'profile_editing'
             await query.edit_message_text(
-                "📝 *Edit Other Info*\\n\\nSend any other information about yourself or type `skip` to leave it empty:\\.",
+                "📝 *Edit Other Info*\n\nSend any other information about yourself or type `skip` to leave it empty:\\.",
                 parse_mode="MarkdownV2",
             )
             return
@@ -4868,7 +4972,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if contact:
                 update_profile_contact_status(contact_id, 'ended')
                 await query.edit_message_text(
-                    "💔 *Friend Removed*\\n\\n"
+                    "💔 *Friend Removed*\n\n"
                     "This user has been removed from your friends list\\.",
                     parse_mode="MarkdownV2",
                     reply_markup=InlineKeyboardMarkup([[
@@ -4898,7 +5002,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 block_profile_user(user_id, requester_id)
                 update_profile_contact_status(contact_id, 'declined')
                 await query.edit_message_text(
-                    "🚫 *User Blocked*\\n\\n"
+                    "🚫 *User Blocked*\n\n"
                     "This user has been blocked and the request declined\\.",
                     parse_mode="MarkdownV2",
                     reply_markup=InlineKeyboardMarkup([[
@@ -4971,8 +5075,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔙 Back", callback_data="menu")],
             ]
             await query.edit_message_text(
-                "⚠️ *Delete Profile*\\n\\n"
-                "This will remove your profile and hide your name from future posts and comments\\.\\n\\n"
+                "⚠️ *Delete Profile*\n\n"
+                "This will remove your profile and hide your name from future posts and comments\\.\n\n"
                 "Are you sure?",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="MarkdownV2",
@@ -4987,7 +5091,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data.pop('profile_draft', None)
                 context.user_data.pop('state', None)
                 await query.edit_message_text(
-                    "✅ *Profile deleted*\\n\\nYou can always create a new one later from the menu\\.",
+                    "✅ *Profile deleted*\n\nYou can always create a new one later from the menu\\.",
                     parse_mode="MarkdownV2",
                 )
             else:
@@ -5029,7 +5133,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['profile_state'] = 'editing_name'
             context.user_data['state'] = 'profile_editing'
             await query.edit_message_text(
-                "✅ *Chat already active*\\!\\n\\nSend messages here and I'll relay them\\.",
+                "✅ *Chat already active*\\!\n\nSend messages here and I'll relay them\\.",
                 parse_mode="MarkdownV2",
             )
             return
@@ -5037,7 +5141,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Update profile name
         if query.data == "update_profile_name":
             await query.edit_message_text(
-                "✏️ *Update Profile Name*\\n\\nSend your new display name \\(2–32 characters\\):",
+                "✏️ *Update Profile Name*\n\nSend your new display name \\(2–32 characters\\):",
                 parse_mode="MarkdownV2",
             )
             return
@@ -5095,224 +5199,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Like comment
     if data.startswith("like_comment_"):
         comment_id = int(data.replace("like_comment_", ""))
-        # Import the new function that awards points
-        from comments import react_to_comment_with_points
-        success, action, likes, dislikes = await react_to_comment_with_points(user_id, comment_id, "like", context)
-        
-        if success:
-            # Update the current message with new reaction counts
-            comment = get_comment_by_id(comment_id)
-            if comment:
-                # Get updated reaction info
-                user_reaction = get_user_reaction(user_id, comment_id)
-                like_emoji = "👍✅" if user_reaction == "like" else "👍"
-                dislike_emoji = "👎✅" if user_reaction == "dislike" else "👎"
-                
-                # Get sequential number for display
-                sequential_number = get_comment_sequential_number(comment_id)
-                
-                # Check if this is a reply or main comment
-                formatted_date = format_date_only(comment[5])  # Get properly escaped date part
-                if comment[4]:  # parent_comment_id exists, so it's a reply
-                    comment_text = f"reply\\# {sequential_number}\n\n{escape_markdown_text(comment[3])}\n\n{formatted_date}"
-                else:
-                    comment_text = f"comment\\# {sequential_number}\n\n{escape_markdown_text(comment[3])}\n\n{formatted_date}"
-                
-                # Create updated keyboard - Always include Reply button for main comments and replies
-                if comment[4]:  # Reply - include reply button for second-level replies too
-                    updated_keyboard = [
-                        [
-                            InlineKeyboardButton(f"{like_emoji} {likes}", callback_data=f"like_comment_{comment_id}"),
-                            InlineKeyboardButton(f"{dislike_emoji} {dislikes}", callback_data=f"dislike_comment_{comment_id}"),
-                            InlineKeyboardButton("💬 Reply", callback_data=f"reply_comment_{comment_id}"),
-                            InlineKeyboardButton("⚠️ Report", callback_data=f"report_comment_{comment_id}")
-                        ]
-                    ]
-                else:  # Main comment
-                    updated_keyboard = [
-                        [
-                            InlineKeyboardButton(f"{like_emoji} {likes}", callback_data=f"like_comment_{comment_id}"),
-                            InlineKeyboardButton(f"{dislike_emoji} {dislikes}", callback_data=f"dislike_comment_{comment_id}"),
-                            InlineKeyboardButton("💬 Reply", callback_data=f"reply_comment_{comment_id}"),
-                            InlineKeyboardButton("⚠️ Report", callback_data=f"report_comment_{comment_id}")
-                        ]
-                    ]
-                
-                updated_reply_markup = InlineKeyboardMarkup(updated_keyboard)
-                
-                try:
-                    await query.edit_message_text(
-                        comment_text,
-                        reply_markup=updated_reply_markup,
-                        parse_mode="MarkdownV2"
-                    )
-                except Exception as e:
-                    logger.error(f"Error updating comment message: {e}")
-            
-            # Show feedback
-            if action == "added":
-                await query.answer(f"👍 Liked! ({likes})")
-            elif action == "removed":
-                await query.answer(f"👍 Like removed! ({likes})")
-            elif action == "changed":
-                await query.answer(f"👍 Changed to like! ({likes})")
-        else:
-            await query.answer("❗ Error liking comment")
-        return
-        
-        # Refresh the comments view by calling the function directly with proper data
-        comment = get_comment_by_id(comment_id)
-        if comment:
-            post_id = comment[1]
-            page = context.user_data.get('current_page', 1)
-            
-            # Call the comments display directly
-            try:
-                comments_data, current_page, total_pages, total_comments = get_comments_paginated(post_id, page)
-                
-                # Build and update the message with refreshed like/dislike counts
-                text = f"💬 *Comments \\({total_comments} total\\)*\n*Page {current_page} of {total_pages}*\n\n"
-                keyboard = []
-                
-                for comment_data in comments_data:
-                    comment = comment_data['comment']
-                    replies = comment_data['replies']
-                    total_replies = comment_data['total_replies']
-                    
-                    comment_id = comment[0]
-                    content = comment[1]
-                    timestamp = comment[2]
-                    likes = comment[3]
-                    dislikes = comment[4]
-                    
-                    # Format comment with proper line spacing
-                    text += f"comment\\# {comment_id}\n\n"
-                    text += f"{escape_markdown_text(content)}\n\n"
-                    formatted_date = format_date_only(timestamp)  # Get properly escaped date part
-                    text += f"{formatted_date}\n"
-                    
-                    # Add replies if any
-                    if replies:
-                        for reply in replies:
-                            reply_content = reply[1]
-                            text += f"↳ {escape_markdown_text(truncate_text(reply_content, 60))}\n"
-                    
-                    if total_replies > len(replies):
-                        text += f"↳ \\.\\.\\.\\.\\. and {total_replies - len(replies)} more replies\n"
-                    
-                    text += "\n"
-                    
-                    # Add reaction buttons for this comment immediately after it
-                    comment_row = [
-                        InlineKeyboardButton("👍", callback_data=f"like_comment_{comment_id}"),
-                        InlineKeyboardButton("👎", callback_data=f"dislike_comment_{comment_id}"),
-                        InlineKeyboardButton("💬", callback_data=f"reply_comment_{comment_id}"),
-                        InlineKeyboardButton("⚠️", callback_data=f"report_comment_{comment_id}")
-                    ]
-                    keyboard.append(comment_row)
-                    
-                    # Add a separator row between comments (except for the last one)
-                    if comment_data != comments_data[-1]:
-                        keyboard.append([InlineKeyboardButton("─────", callback_data="separator")])
-                
-                # Navigation buttons
-                nav_buttons = []
-                if current_page > 1:
-                    nav_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"see_comments_{post_id}_{current_page-1}"))
-                if current_page < total_pages:
-                    nav_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"see_comments_{post_id}_{current_page+1}"))
-                
-                if nav_buttons:
-                    keyboard.append(nav_buttons)
-                
-                # Action buttons
-                keyboard.append([
-                    InlineKeyboardButton("💬 Add Comment", callback_data=f"add_comment_{post_id}"),
-                    InlineKeyboardButton("🔙 Back to Post", callback_data=f"view_post_{post_id}")
-                ])
-                keyboard.append([InlineKeyboardButton("🏠 Main Menu", callback_data="menu")])
-                
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                await query.edit_message_text(
-                    text,
-                    reply_markup=reply_markup,
-                    parse_mode="MarkdownV2"
-                )
-            except Exception as e:
-                logger.error(f"Error refreshing comments view: {e}")
+        await handle_comment_reaction(update, context, comment_id, "like")
         return
     
     # Dislike comment
     if data.startswith("dislike_comment_"):
         comment_id = int(data.replace("dislike_comment_", ""))
-        # Import the new function that awards points
-        from comments import react_to_comment_with_points
-        success, action, likes, dislikes = await react_to_comment_with_points(user_id, comment_id, "dislike", context)
-        
-        if success:
-            # Update the current message with new reaction counts
-            comment = get_comment_by_id(comment_id)
-            if comment:
-                # Get updated reaction info
-                user_reaction = get_user_reaction(user_id, comment_id)
-                like_emoji = "👍✅" if user_reaction == "like" else "👍"
-                dislike_emoji = "👎✅" if user_reaction == "dislike" else "👎"
-                
-                # Get sequential number for display
-                sequential_number = get_comment_sequential_number(comment_id)
-                
-                # Check if this is a reply or main comment
-                formatted_date = format_date_only(comment[5])  # Get properly escaped date part
-                if comment[4]:  # parent_comment_id exists, so it's a reply
-                    comment_text = f"reply\\# {sequential_number}\n\n{escape_markdown_text(comment[3])}\n\n{formatted_date}"
-                else:
-                    comment_text = f"comment\\# {sequential_number}\n\n{escape_markdown_text(comment[3])}\n\n{formatted_date}"
-                
-                # Create updated keyboard - Always include Reply button for main comments and replies
-                if comment[4]:  # Reply - include reply button for second-level replies too
-                    updated_keyboard = [
-                        [
-                            InlineKeyboardButton(f"{like_emoji} {likes}", callback_data=f"like_comment_{comment_id}"),
-                            InlineKeyboardButton(f"{dislike_emoji} {dislikes}", callback_data=f"dislike_comment_{comment_id}"),
-                            InlineKeyboardButton("💬 Reply", callback_data=f"reply_comment_{comment_id}"),
-                            InlineKeyboardButton("⚠️ Report", callback_data=f"report_comment_{comment_id}")
-                        ]
-                    ]
-                else:  # Main comment
-                    updated_keyboard = [
-                        [
-                            InlineKeyboardButton(f"{like_emoji} {likes}", callback_data=f"like_comment_{comment_id}"),
-                            InlineKeyboardButton(f"{dislike_emoji} {dislikes}", callback_data=f"dislike_comment_{comment_id}"),
-                            InlineKeyboardButton("💬 Reply", callback_data=f"reply_comment_{comment_id}"),
-                            InlineKeyboardButton("⚠️ Report", callback_data=f"report_comment_{comment_id}")
-                        ]
-                    ]
-                
-                updated_reply_markup = InlineKeyboardMarkup(updated_keyboard)
-                
-                try:
-                    await query.edit_message_text(
-                        comment_text,
-                        reply_markup=updated_reply_markup,
-                        parse_mode="MarkdownV2"
-                    )
-                except Exception as e:
-                    logger.error(f"Error updating comment message: {e}")
-            
-            # Show feedback
-            if action == "added":
-                await query.answer(f"👎 Disliked! ({dislikes})")
-            elif action == "removed":
-                await query.answer(f"👎 Dislike removed! ({dislikes})")
-            elif action == "changed":
-                await query.answer(f"👎 Changed to dislike! ({dislikes})")
+        await handle_comment_reaction(update, context, comment_id, "dislike")
+        return
 
     
     # Reply to comment
     if data.startswith("reply_comment_"):
         comment_id = int(data.replace("reply_comment_", ""))
-        comment = get_comment_by_id(comment_id)
+        comment, sequential_number = await asyncio.gather(
+            AsyncDBWrapper.run_sync(get_comment_by_id, comment_id),
+            AsyncDBWrapper.run_sync(get_comment_sequential_number, comment_id),
+        )
         
         if comment:
             post_id = comment[1]
@@ -5321,9 +5224,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['state'] = 'writing_comment'
             
             comment_preview = truncate_text(comment[3], 100)
-            
-            # Get sequential number for display
-            sequential_number = get_comment_sequential_number(comment_id)
             
             # Create cancel button for the reply interface
             reply_cancel_keyboard = [[InlineKeyboardButton("🚫 Cancel", callback_data="cancel_to_menu")]]
@@ -5701,12 +5601,12 @@ Select a category below:
             if success:
                 await query.answer("✅ Comment replaced with removal notice")
                 await query.edit_message_text(
-                    f"✅ **Comment Replaced Successfully**\\n\\n"
+                    f"✅ **Comment Replaced Successfully**\n\n"
                     f"**Comment \\#{comment_id}** has been replaced with a removal notice\\."
-                    f"\\n\\n**Statistics:**\\n"
-                    f"• Comments replaced: {replacement_stats['comments_replaced']}\\n"
-                    f"• Replies replaced: {replacement_stats['replies_replaced']}\\n"
-                    f"• Reports cleared: {replacement_stats['reports_cleared']}\\n\\n"
+                    f"\n\n**Statistics:**\n"
+                    f"• Comments replaced: {replacement_stats['comments_replaced']}\n"
+                    f"• Replies replaced: {replacement_stats['replies_replaced']}\n"
+                    f"• Reports cleared: {replacement_stats['reports_cleared']}\n\n"
                     f"The comment structure has been preserved while hiding inappropriate content\\.",
                     parse_mode="MarkdownV2"
                 )
@@ -5714,8 +5614,8 @@ Select a category below:
                 error_message = replacement_stats.get('error', 'Unknown error')
                 await query.answer("❗ Failed to replace comment")
                 await query.edit_message_text(
-                    f"❗ **Failed to replace comment \\#{comment_id}**\\n\\n"
-                    f"Error: {escape_markdown_text(error_message)}\\n\\n"
+                    f"❗ **Failed to replace comment \\#{comment_id}**\n\n"
+                    f"Error: {escape_markdown_text(error_message)}\n\n"
                     f"Please try again or contact system administrator\\.",
                     parse_mode="MarkdownV2"
                 )
@@ -10754,7 +10654,13 @@ def main():
         connect_timeout=10.0
     )
     
-    application = Application.builder().token(BOT_TOKEN).request(request).build()
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .request(request)
+        .concurrent_updates(256)
+        .build()
+    )
     
     # Add error handler
     application.add_error_handler(global_error_handler)

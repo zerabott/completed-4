@@ -403,34 +403,34 @@ class ContentModerator:
         """Log moderation result to database"""
         conn = get_db()
         cursor = conn.cursor()
-            
-            # Update content with moderation results
-            if content_type == "post":
-                cursor.execute("""
-                    UPDATE posts SET 
-                        sentiment_score = ?, sentiment_label = ?,
-                        profanity_detected = ?, spam_score = ?
-                    WHERE post_id = ?
-                """, (result.sentiment_score, result.sentiment_label, 
-                      1 if result.profanity_detected else 0, result.spam_score, content_id))
-            
-            elif content_type == "comment":
-                cursor.execute("""
-                    UPDATE comments SET 
-                        sentiment_score = ?, sentiment_label = ?,
-                        profanity_detected = ?, spam_score = ?
-                    WHERE comment_id = ?
-                """, (result.sentiment_score, result.sentiment_label, 
-                      1 if result.profanity_detected else 0, result.spam_score, content_id))
-            
-            # Log moderation action
+        
+        # Update content with moderation results
+        if content_type == "post":
             cursor.execute("""
-                INSERT INTO moderation_log (
-                    moderator_id, target_type, target_id, action, reason
-                ) VALUES (?, ?, ?, ?, ?)
-            """, (moderator_id, content_type, content_id, action, reason))
-            
-            conn.commit()
+                UPDATE posts SET 
+                    sentiment_score = ?, sentiment_label = ?,
+                    profanity_detected = ?, spam_score = ?
+                WHERE post_id = ?
+            """, (result.sentiment_score, result.sentiment_label, 
+                  1 if result.profanity_detected else 0, result.spam_score, content_id))
+        
+        elif content_type == "comment":
+            cursor.execute("""
+                UPDATE comments SET 
+                    sentiment_score = ?, sentiment_label = ?,
+                    profanity_detected = ?, spam_score = ?
+                WHERE comment_id = ?
+            """, (result.sentiment_score, result.sentiment_label, 
+                  1 if result.profanity_detected else 0, result.spam_score, content_id))
+        
+        # Log moderation action
+        cursor.execute("""
+            INSERT INTO moderation_log (
+                moderator_id, target_type, target_id, action, reason
+            ) VALUES (?, ?, ?, ?, ?)
+        """, (moderator_id, content_type, content_id, action, reason))
+        
+        conn.commit()
 
 
 class AutoModerator:

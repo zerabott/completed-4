@@ -343,7 +343,8 @@ Your recent notifications ({len(history)} shown):
             
             history_text += f"{i}\\. {type_emoji} *{escape_markdown_text(title)}*\n"
             history_text += f"   {escape_markdown_text(time_str)} {status}\n"
-            history_text += f"   {escape_markdown_text(content[:50])}{'\\.\\.\\.' if len(content) > 50 else ''}\n\n"
+            ellipsis = "\\.\\.\\." if len(content) > 50 else ""
+            history_text += f"   {escape_markdown_text(content[:50])}{ellipsis}\n\n"
         
         keyboard = [
             [

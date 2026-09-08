@@ -3,7 +3,7 @@ python-telegram-bot>=20.0
 flask>=2.3.0
 
 # Environment and Configuration
-# python-dotenv removed - Replit provides environment variables natively
+python-dotenv>=1.0.0  # loads .env for local runs; hosts inject env vars natively
 pytz>=2023.3
 
 # Database and Caching

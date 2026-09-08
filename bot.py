@@ -19,6 +19,7 @@ from db import get_user_profile_async, get_all_users_async
 from db import update_user_post_async, delete_user_post_async
 from db import upsert_user_profile, get_user_profile, delete_user_profile
 from db import set_profile_visibility, set_profile_accepting_contacts
+from db import get_user_profile_stats
 from db import (
     async_add_user,
     async_is_blocked_user,

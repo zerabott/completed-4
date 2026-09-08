@@ -1,6 +1,7 @@
 import os
 import logging
 import sqlite3
+import threading
 import time
 import asyncio
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -10,7 +11,7 @@ from functools import lru_cache, wraps
 try:
     import psycopg2
     import psycopg2.extras
-    from psycopg2.pool import SimpleConnectionPool
+    from psycopg2.pool import ThreadedConnectionPool
     PSYCOPG2_AVAILABLE = True
 except ImportError:
     PSYCOPG2_AVAILABLE = False
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Global cache for frequently accessed data
 _global_cache = {}
+_cache_lock = threading.Lock()
 _cache_ttl = 300  # 5 minutes default TTL
 
 class CacheManager:
@@ -33,43 +35,50 @@ class CacheManager:
     @staticmethod
     def get(key: str) -> Optional[Any]:
         """Get value from cache if not expired"""
-        if key in _global_cache:
-            value, expiry_time = _global_cache[key]
+        with _cache_lock:
+            entry = _global_cache.get(key)
+            if entry is None:
+                return None
+            value, expiry_time = entry
             if time.time() < expiry_time:
                 return value
-            else:
-                del _global_cache[key]
+            _global_cache.pop(key, None)
         return None
     
     @staticmethod
     def set(key: str, value: Any, ttl: int = _cache_ttl):
         """Set value in cache with TTL"""
-        _global_cache[key] = (value, time.time() + ttl)
+        with _cache_lock:
+            _global_cache[key] = (value, time.time() + ttl)
     
     @staticmethod
     def delete(key: str):
         """Delete value from cache"""
-        _global_cache.pop(key, None)
+        with _cache_lock:
+            _global_cache.pop(key, None)
     
     @staticmethod
     def delete_pattern(pattern: str):
         """Delete keys matching pattern (simple prefix matching)"""
-        keys_to_delete = [k for k in _global_cache.keys() if k.startswith(pattern)]
-        for key in keys_to_delete:
-            del _global_cache[key]
+        with _cache_lock:
+            keys_to_delete = [k for k in _global_cache if k.startswith(pattern)]
+            for key in keys_to_delete:
+                del _global_cache[key]
     
     @staticmethod
     def clear():
         """Clear all cache"""
-        _global_cache.clear()
+        with _cache_lock:
+            _global_cache.clear()
     
     @staticmethod
     def get_stats() -> Dict[str, int]:
         """Get cache statistics"""
-        return {
-            'cached_items': len(_global_cache),
-            'memory_estimate_kb': len(str(_global_cache)) // 1024
-        }
+        with _cache_lock:
+            return {
+                'cached_items': len(_global_cache),
+                'memory_estimate_kb': len(str(_global_cache)) // 1024
+            }
 
 # Global cache manager instance
 cache_manager = CacheManager()
@@ -140,6 +149,7 @@ class DatabaseConnection:
     def __init__(self):
         self.use_postgresql = USE_POSTGRESQL or DATABASE_URL is not None
         self.connection_pool = None
+        self._pg_slots = None  # Limits threads waiting on the PostgreSQL pool
         self._sqlite_pool = None  # SQLite connection pool
         
         if self.use_postgresql:
@@ -162,20 +172,36 @@ class DatabaseConnection:
                 # Build connection string from individual components
                 connection_string = f"postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DATABASE}"
             
-            # Create connection pool with optimized settings for better performance
-            self.connection_pool = SimpleConnectionPool(
-                minconn=5,      # Minimum connections (increased from 2)
-                maxconn=50,     # Maximum connections (increased from 30)
+            # Thread-safe pool: worker threads from AsyncDBWrapper share it concurrently.
+            # Managed PostgreSQL plans cap max_connections (Aiven hobby plans allow 20 for
+            # the whole server), so keep the pool small and warm rather than large: opening
+            # a connection to a remote database costs ~1s, and TCP keepalives hold the warm
+            # ones open instead of reconnecting.
+            # minconn == maxconn on purpose: psycopg2 closes every connection above
+            # minconn when it is returned, so a mixed pool re-opens connections on each
+            # burst of concurrent queries.
+            pool_size = int(os.getenv('PG_POOL_SIZE', '5'))
+            minconn = maxconn = pool_size
+            self.connection_pool = ThreadedConnectionPool(
+                minconn=minconn,
+                maxconn=maxconn,
                 dsn=connection_string,
-                connect_timeout=10  # Connection timeout
+                connect_timeout=10,
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=3,
             )
+            # getconn() raises instead of waiting once the pool is drained, so callers queue
+            # here rather than failing when more worker threads than connections are busy.
+            self._pg_slots = threading.BoundedSemaphore(maxconn)
             
             # Test connection
             with self.get_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("SELECT 1")
                     
-            logger.info("PostgreSQL connection pool initialized successfully (5-50 connections)")
+            logger.info(f"PostgreSQL connection pool initialized successfully ({pool_size} warm connections)")
             
         except Exception as e:
             logger.error(f"Failed to initialize PostgreSQL: {e}")
@@ -264,18 +290,29 @@ class DatabaseConnection:
         logger.info("SQLite performance optimizations configured")
     
     @contextmanager
-    def get_connection(self):
-        """Get database connection with automatic cleanup from connection pool"""
+    def get_connection(self, readonly: bool = False):
+        """Get database connection with automatic cleanup from connection pool.
+
+        With readonly=True the PostgreSQL connection runs in autocommit mode, which
+        drops the implicit BEGIN and the ROLLBACK psycopg2 performs when the
+        connection goes back to the pool. On a remote database those are two extra
+        network round trips per lookup, so a plain SELECT costs a third of the time.
+        Only use it for statements that need no transaction.
+        """
         if self.use_postgresql:
             conn = None
+            self._pg_slots.acquire()
             try:
                 conn = self.connection_pool.getconn()
+                if conn.autocommit != readonly:
+                    conn.autocommit = readonly
                 yield conn
             finally:
                 if conn:
                     self.connection_pool.putconn(conn)
+                self._pg_slots.release()
         else:
-            # Use SQLite connection pool if available
+            # Use SQLite connection pool if available (readonly is a no-op here)
             if self._sqlite_pool:
                 conn = None
                 try:

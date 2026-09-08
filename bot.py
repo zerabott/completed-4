@@ -46,7 +46,7 @@ from db import (
     async_increment_user_questions,
     async_increment_user_comments
 )
-from db_connection import get_db_connection, cache_manager, make_async
+from db_connection import get_db_connection, cache_manager, make_async, AsyncDBWrapper
 from submission import *
 from submission import validate_media, validate_caption, get_media_type_emoji
 from comments import *
@@ -1138,6 +1138,11 @@ async def handle_profile_text_input(update: Update, context: ContextTypes.DEFAUL
         return
 
 
+async def _resolved(value):
+    """Awaitable placeholder so a skipped lookup can take part in asyncio.gather."""
+    return value
+
+
 async def show_profile_card(update: Update, context: ContextTypes.DEFAULT_TYPE, profile_user_id: int, back_to_request_contact_id: Optional[int] = None):
     """Show a user's profile card with contact/block options.
     
@@ -1151,7 +1156,27 @@ async def show_profile_card(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     
     viewer_id = update.effective_user.id if update.effective_user else None
 
-    profile = get_user_profile(profile_user_id)
+    from ranking_integration import ranking_manager
+
+    checks_block = bool(viewer_id and viewer_id != profile_user_id)
+    profile, stats, user_rank, is_blocked = await asyncio.gather(
+        AsyncDBWrapper.run_sync(get_user_profile, profile_user_id),
+        AsyncDBWrapper.run_sync(get_user_profile_stats, profile_user_id),
+        AsyncDBWrapper.run_sync(ranking_manager.get_user_rank, profile_user_id),
+        AsyncDBWrapper.run_sync(is_profile_blocked_either_way, viewer_id, profile_user_id)
+        if checks_block else _resolved(False),
+        return_exceptions=True,
+    )
+
+    for label, value in (
+        ("profile", profile), ("stats", stats),
+        ("rank info", user_rank), ("profile blocks", is_blocked),
+    ):
+        if isinstance(value, Exception):
+            logger.error(f"Error fetching {label} for {profile_user_id}: {value}")
+
+    if isinstance(profile, Exception):
+        profile = None
     if not profile or not profile.get('is_active'):
         # Simple HTML message when profile is not available
         text = (
@@ -1202,12 +1227,10 @@ async def show_profile_card(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         details_lines.append(f"Other Info: {html_escape(short_other)}")
 
     # Basic stats for the profile owner
-    try:
-        stats = get_user_profile_stats(profile_user_id)
+    if isinstance(stats, dict):
         conf_count = stats.get('confessions', 0)
         comm_count = stats.get('comments', 0)
-    except Exception as e:
-        logger.error(f"Error fetching profile stats for {profile_user_id}: {e}")
+    else:
         conf_count = comm_count = 0
 
     conf_count_str = html_escape(str(conf_count))
@@ -1215,24 +1238,18 @@ async def show_profile_card(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     
     # Get user's rank information
     rank_info = ""
-    try:
-        from ranking_integration import ranking_manager
-        user_rank = ranking_manager.get_user_rank(profile_user_id)
-        if user_rank:
-            rank_emoji = user_rank.rank_emoji
-            rank_name = user_rank.rank_name
-            total_points = user_rank.total_points
-            
-            # Format rank with special styling for special ranks
-            if user_rank.is_special_rank:
-                rank_info = f"✨ {rank_emoji} <b>{html_escape(rank_name)}</b> ✨\n"
-                rank_info += f"💎 <b>{html_escape(str(total_points))}</b> points\n"
-            else:
-                rank_info = f"{rank_emoji} <b>{html_escape(rank_name)}</b>\n"
-                rank_info += f"💎 <b>{html_escape(str(total_points))}</b> points\n"
-    except Exception as e:
-        logger.error(f"Error fetching rank info for {profile_user_id}: {e}")
-        rank_info = ""
+    if user_rank and not isinstance(user_rank, Exception):
+        rank_emoji = user_rank.rank_emoji
+        rank_name = user_rank.rank_name
+        total_points = user_rank.total_points
+        
+        # Format rank with special styling for special ranks
+        if user_rank.is_special_rank:
+            rank_info = f"✨ {rank_emoji} <b>{html_escape(rank_name)}</b> ✨\n"
+            rank_info += f"💎 <b>{html_escape(str(total_points))}</b> points\n"
+        else:
+            rank_info = f"{rank_emoji} <b>{html_escape(rank_name)}</b>\n"
+            rank_info += f"💎 <b>{html_escape(str(total_points))}</b> points\n"
 
     lines = [
         "<b>👤 User Profile</b>",
@@ -1272,12 +1289,7 @@ async def show_profile_card(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         # Normal profile view - show all buttons
         if viewer_id and viewer_id != profile_user_id:
             # Check if contact is allowed
-            can_contact = True
-            try:
-                if is_profile_blocked_either_way(viewer_id, profile_user_id):
-                    can_contact = False
-            except Exception as e:
-                logger.error(f"Error checking profile blocks between {viewer_id} and {profile_user_id}: {e}")
+            can_contact = not (is_blocked is True)
             if can_contact and profile.get('is_active'):
                 buttons.append([InlineKeyboardButton("💬 Contact", callback_data=f"profile_contact_{profile_user_id}")])
             buttons.append([InlineKeyboardButton("🚫 Block user", callback_data=f"profile_block_{profile_user_id}")])
@@ -1376,7 +1388,26 @@ async def handle_profile_chat_message(update: Update, context: ContextTypes.DEFA
         return
 
     # Verify contact is still active and not blocked
-    contact = get_profile_contact_by_id(contact_id)
+    contact, is_blocked, daily_count, sender_profile = await asyncio.gather(
+        AsyncDBWrapper.run_sync(get_profile_contact_by_id, contact_id),
+        AsyncDBWrapper.run_sync(is_profile_blocked_either_way, user_id, partner_id),
+        AsyncDBWrapper.run_sync(get_user_daily_message_count, user_id),
+        AsyncDBWrapper.run_sync(get_user_profile, user_id),
+        return_exceptions=True,
+    )
+
+    for label, value in (
+        ("contact", contact), ("blocks", is_blocked),
+        ("daily message count", daily_count), ("sender profile", sender_profile),
+    ):
+        if isinstance(value, Exception):
+            logger.error(f"Error fetching {label} for profile chat {contact_id}: {value}")
+
+    if isinstance(contact, Exception):
+        contact = None
+    if isinstance(sender_profile, Exception):
+        sender_profile = None
+
     if not contact or contact.get('status') != 'active':
         await update.message.reply_text(
             "❗ This chat has ended\\\\. You can send a new request from the user's profile\\\\."
@@ -1385,7 +1416,7 @@ async def handle_profile_chat_message(update: Update, context: ContextTypes.DEFA
         context.user_data.pop('reply_mode_active', None)
         return
 
-    if is_profile_blocked_either_way(user_id, partner_id):
+    if is_blocked is True:
         await update.message.reply_text(
             "🚫 This chat is no longer available\\\\."
         )
@@ -1394,7 +1425,7 @@ async def handle_profile_chat_message(update: Update, context: ContextTypes.DEFA
         return
 
     # Check if user has exceeded daily message limit (10 messages per day)
-    if get_user_daily_message_count(user_id) >= 20:
+    if isinstance(daily_count, int) and daily_count >= 20:
         await update.message.reply_text(
             "❗ You've reached your daily message limit \\(10 messages per day\\)\\.\n"
             "Please try again tomorrow\\."
@@ -1410,12 +1441,11 @@ async def handle_profile_chat_message(update: Update, context: ContextTypes.DEFA
         return
 
     # Increment message count for the user
-    increment_user_daily_message_count(user_id)
+    await AsyncDBWrapper.run_sync(increment_user_daily_message_count, user_id)
 
     # Disable reply mode after sending a message
     context.user_data['reply_mode_active'] = False
 
-    sender_profile = get_user_profile(user_id)
     if sender_profile:
         name_raw = (sender_profile.get('emoji') or '') + ' ' + (sender_profile.get('display_name') or '')
         name_line = escape_markdown_text(name_raw.strip() if name_raw.strip() else "Anonymous")
@@ -1456,7 +1486,7 @@ async def handle_profile_chat_message(update: Update, context: ContextTypes.DEFA
         return
 
     try:
-        touch_profile_contact(contact_id)
+        await AsyncDBWrapper.run_sync(touch_profile_contact, contact_id)
     except Exception as e:
         logger.error(f"Error touching profile contact {contact_id}: {e}")
 
@@ -4211,17 +4241,33 @@ async def handle_profile_contact_request(update: Update, context: ContextTypes.D
         await query.answer("You can't contact yourself\\.")
         return
 
-    # Respect blocks in either direction
-    try:
-        if is_profile_blocked_either_way(user_id, target_user_id):
-            logger.info(f"User {user_id} is blocked from contacting {target_user_id}")
-            await query.answer("You cannot contact this user\\.")
-            return
-    except Exception as e:
-        logger.error(f"Error checking blocks for contact request {user_id}->{target_user_id}: {e}")
+    is_blocked, requester_profile, target_profile, contact = await asyncio.gather(
+        AsyncDBWrapper.run_sync(is_profile_blocked_either_way, user_id, target_user_id),
+        AsyncDBWrapper.run_sync(get_user_profile, user_id),
+        AsyncDBWrapper.run_sync(get_user_profile, target_user_id),
+        AsyncDBWrapper.run_sync(get_profile_contact, user_id, target_user_id),
+        return_exceptions=True,
+    )
 
-    requester_profile = get_user_profile(user_id)
-    target_profile = get_user_profile(target_user_id)
+    for label, value in (
+        ("blocks", is_blocked), ("requester profile", requester_profile),
+        ("target profile", target_profile), ("existing contact", contact),
+    ):
+        if isinstance(value, Exception):
+            logger.error(f"Error fetching {label} for contact request {user_id}->{target_user_id}: {value}")
+
+    # Respect blocks in either direction
+    if is_blocked is True:
+        logger.info(f"User {user_id} is blocked from contacting {target_user_id}")
+        await query.answer("You cannot contact this user\\.")
+        return
+
+    if isinstance(requester_profile, Exception):
+        requester_profile = None
+    if isinstance(target_profile, Exception):
+        target_profile = None
+    if isinstance(contact, Exception):
+        contact = None
     
     logger.info(f"Requester profile: {requester_profile}")
     logger.info(f"Target profile: {target_profile}")
@@ -4251,7 +4297,6 @@ async def handle_profile_contact_request(update: Update, context: ContextTypes.D
         )
         return
 
-    contact = get_profile_contact(user_id, target_user_id)
     if contact:
         status = contact.get('status')
         if status == 'pending':
@@ -4276,7 +4321,9 @@ async def handle_profile_contact_request(update: Update, context: ContextTypes.D
             return
 
     # Create new pending contact
-    contact_id = create_profile_contact(user_id, target_user_id, initiator_id=user_id, status='pending')
+    contact_id = await AsyncDBWrapper.run_sync(
+        create_profile_contact, user_id, target_user_id, user_id, 'pending'
+    )
     
     logger.info(f"Created new contact request: contact_id={contact_id}")
 
@@ -4340,7 +4387,7 @@ async def handle_profile_contact_decision(update: Update, context: ContextTypes.
         return
     user_id = user.id
 
-    contact = get_profile_contact_by_id(contact_id)
+    contact = await AsyncDBWrapper.run_sync(get_profile_contact_by_id, contact_id)
     if not contact:
         await query.edit_message_text(
             "❗ This chat request is no longer available\\\\.",
@@ -4355,7 +4402,7 @@ async def handle_profile_contact_decision(update: Update, context: ContextTypes.
     partner_id = contact['user_a_id'] if contact['user_a_id'] != user_id else contact['user_b_id']
 
     if action == 'decline':
-        update_profile_contact_status(contact_id, 'ended')
+        await AsyncDBWrapper.run_sync(update_profile_contact_status, contact_id, 'ended')
         await query.edit_message_text(
             "❌ You declined this chat request\\.",
             parse_mode="MarkdownV2",
@@ -4371,8 +4418,8 @@ async def handle_profile_contact_decision(update: Update, context: ContextTypes.
         return
 
     if action == 'block':
-        block_profile_user(user_id, partner_id)
-        update_profile_contact_status(contact_id, 'ended')
+        await AsyncDBWrapper.run_sync(block_profile_user, user_id, partner_id)
+        await AsyncDBWrapper.run_sync(update_profile_contact_status, contact_id, 'ended')
         await query.edit_message_text(
             "🚫 You blocked this user\\. They won't be able to contact you through profiles\\.",
             parse_mode="MarkdownV2",
@@ -4388,7 +4435,7 @@ async def handle_profile_contact_decision(update: Update, context: ContextTypes.
         return
 
     if action == 'accept':
-        update_profile_contact_status(contact_id, 'active')
+        await AsyncDBWrapper.run_sync(update_profile_contact_status, contact_id, 'active')
         # Store mapping in bot_data for quick lookup
         sessions = context.bot_data.setdefault('profile_sessions', {})
         a_id, b_id = contact['user_a_id'], contact['user_b_id']
@@ -4403,8 +4450,10 @@ async def handle_profile_contact_decision(update: Update, context: ContextTypes.
         context.user_data['reply_mode_active'] = True
 
         try:
-            partner_profile = get_user_profile(partner_id)
-            viewer_profile = get_user_profile(user_id)
+            partner_profile, viewer_profile = await asyncio.gather(
+                AsyncDBWrapper.run_sync(get_user_profile, partner_id),
+                AsyncDBWrapper.run_sync(get_user_profile, user_id),
+            )
 
             def _display(p):
                 if not p:
@@ -4463,7 +4512,7 @@ async def handle_profile_chat_control(update: Update, context: ContextTypes.DEFA
         return
     user_id = user.id
 
-    contact = get_profile_contact_by_id(contact_id)
+    contact = await AsyncDBWrapper.run_sync(get_profile_contact_by_id, contact_id)
     if not contact:
         await query.edit_message_text(
             "❗ This chat is no longer available\\\\.",
@@ -4479,7 +4528,7 @@ async def handle_profile_chat_control(update: Update, context: ContextTypes.DEFA
     partner_id = contact['user_a_id'] if contact['user_a_id'] != user_id else contact['user_b_id']
 
     if action == 'end':
-        update_profile_contact_status(contact_id, 'ended')
+        await AsyncDBWrapper.run_sync(update_profile_contact_status, contact_id, 'ended')
         # Clear local chat state
         context.user_data.pop('state', None)
         context.user_data.pop('profile_chat_partner', None)
@@ -4499,8 +4548,8 @@ async def handle_profile_chat_control(update: Update, context: ContextTypes.DEFA
         return
 
     if action == 'block':
-        block_profile_user(user_id, partner_id)
-        update_profile_contact_status(contact_id, 'ended')
+        await AsyncDBWrapper.run_sync(block_profile_user, user_id, partner_id)
+        await AsyncDBWrapper.run_sync(update_profile_contact_status, contact_id, 'ended')
         context.user_data.pop('state', None)
         context.user_data.pop('profile_chat_partner', None)
         context.user_data.pop('profile_contact_id', None)
@@ -10754,7 +10803,13 @@ def main():
         connect_timeout=10.0
     )
     
-    application = Application.builder().token(BOT_TOKEN).request(request).build()
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .request(request)
+        .concurrent_updates(256)
+        .build()
+    )
     
     # Add error handler
     application.add_error_handler(global_error_handler)

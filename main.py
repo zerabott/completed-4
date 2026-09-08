@@ -10,12 +10,12 @@ import logging
 from datetime import datetime
 
 # Load environment variables from .env file if not running on Replit
+DOTENV_AVAILABLE = True
 try:
     from dotenv import load_dotenv
     load_dotenv()  # Load .env file
 except ImportError:
-    # If python-dotenv is not available, continue without it
-    pass
+    DOTENV_AVAILABLE = False
 
 # Set up logging for Replit
 logging.basicConfig(
@@ -43,7 +43,19 @@ def check_environment():
     
     if missing_vars:
         logger.error(f"❌ Missing required environment variables: {missing_vars}")
-        logger.error("Please set these in your Replit secrets.")
+        if not DOTENV_AVAILABLE:
+            logger.error(
+                "python-dotenv is not installed, so a .env file cannot be read. "
+                "Install it with: pip install python-dotenv"
+            )
+        elif not os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')):
+            logger.error(
+                "No .env file found. Copy .env.example to .env and fill in your values."
+            )
+        logger.error(
+            "Set them in your .env file (local runs) or in the host's secrets/environment "
+            "variables (Replit, Render, etc.)."
+        )
         return False
     
     logger.info("✅ All required environment variables are set")

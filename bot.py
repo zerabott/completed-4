@@ -3813,7 +3813,8 @@ async def edit_my_post_callback(update: Update, context: ContextTypes.DEFAULT_TY
     logger.info(f"Escaped category: {escaped_category}")
     logger.info(f"Escaped content first 100 chars: {escaped_content[:100]}")
     logger.info(f"Content has dots before escape: {'.' in str(content)}")
-    logger.info(f"Escaped content has backslash-dot: {'\\.' in escaped_content}")
+    has_escaped_dot = "\\." in escaped_content
+    logger.info(f"Escaped content has backslash-dot: {has_escaped_dot}")
     
     edit_text = (
         f"✏️ *Edit Your Confession*\n\n"
@@ -10289,7 +10290,8 @@ async def admin_user_posts_callback(update: Update, context: ContextTypes.DEFAUL
             
             posts_text += f"{i}\\. *Post \\#{post['post_id']}* {status_emoji}\n"
             posts_text += f"   Category: {escape_markdown_text(post['category'])}\n"
-            posts_text += f"   Content: {escape_markdown_text(post['content'][:100])}{'\\.\\.\\.' if len(post['content']) > 100 else ''}\n"
+            ellipsis = "\\.\\.\\." if len(post['content']) > 100 else ""
+            posts_text += f"   Content: {escape_markdown_text(post['content'][:100])}{ellipsis}\n"
             posts_text += f"   Comments: {post['comments_count']} \\| Status: {status_text}\n\n"
         
         # Create navigation buttons
@@ -10371,7 +10373,8 @@ async def admin_user_comments_callback(update: Update, context: ContextTypes.DEF
         for i, comment in enumerate(comments_data['comments'], 1):
             comments_text += f"{i}\\. *Comment \\#{comment['comment_id']}*\n"
             comments_text += f"   Post: \\#{comment['post_id']}\n"
-            comments_text += f"   Content: {escape_markdown_text(comment['content'][:80])}{'\\.\\.\\.' if len(comment['content']) > 80 else ''}\n"
+            ellipsis = "\\.\\.\\." if len(comment['content']) > 80 else ""
+            comments_text += f"   Content: {escape_markdown_text(comment['content'][:80])}{ellipsis}\n"
             comments_text += f"   Likes: {comment['likes']} \\| Dislikes: {comment['dislikes']}\n\n"
         
         # Create navigation buttons

@@ -188,8 +188,10 @@ class EnhancedRankingUI:
         header = f"🏆 *{leaderboard_type.title()} Leaderboard*\n\n"
         if stats:
             header += f"👥 **{escape_markdown_text(str(stats.get('total_participants', 0)))}** active participants\n"
-            header += f"📊 Average: **{escape_markdown_text(f'{stats.get("average_points", 0):,}')}** points\n"
-            header += f"🎯 Highest: **{escape_markdown_text(f'{stats.get("highest_points", 0):,}')}** points\n\n"
+            average_points = escape_markdown_text(f"{stats.get('average_points', 0):,}")
+            highest_points = escape_markdown_text(f"{stats.get('highest_points', 0):,}")
+            header += f"📊 Average: **{average_points}** points\n"
+            header += f"🎯 Highest: **{highest_points}** points\n\n"
         
         leaderboard_text = header
         

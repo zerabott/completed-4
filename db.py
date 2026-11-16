@@ -742,8 +742,18 @@ def init_db():
 
         conn.commit()
 
+_recent_user_upserts = {}
+_USER_UPSERT_TTL = 6 * 3600
+
+
 def add_user(user_id, username=None, first_name=None, last_name=None):
     """Add or update user information - optimized with batch operations"""
+    # /start runs this every time; skip the database write when this process
+    # already stored the same names for the user recently.
+    names = (username, first_name, last_name)
+    recent = _recent_user_upserts.get(user_id)
+    if recent and recent[0] == names and time.time() - recent[1] < _USER_UPSERT_TTL:
+        return
     db_conn = get_db_connection()
     with db_conn.get_connection() as conn:
         cursor = conn.cursor()
@@ -771,6 +781,8 @@ def add_user(user_id, username=None, first_name=None, last_name=None):
             ''', (user_id, username, first_name, last_name, user_id, user_id, user_id, user_id))
         conn.commit()
     
+    _recent_user_upserts[user_id] = (names, time.time())
+
     # Invalidate user cache
     cache_manager.delete(f'user_info_{user_id}')
     cache_manager.delete(f'user_blocked_{user_id}')

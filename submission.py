@@ -120,7 +120,7 @@ def save_submission(user_id, content, category, media_type=None, file_id=None, c
 def get_pending_submissions():
     """Get all submissions pending approval (including edited ones)"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         # Get posts where approved IS NULL (pending initial or pending edit)
         cursor.execute("SELECT * FROM posts WHERE approved IS NULL ORDER BY timestamp DESC")
@@ -129,7 +129,7 @@ def get_pending_submissions():
 def get_recent_posts(limit=10):
     """Get recent approved posts with comment counts"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(f'''
@@ -150,7 +150,7 @@ def get_recent_posts(limit=10):
 def get_post_by_id(post_id):
     """Get a specific post by ID with comment count and edited status"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(f'''
@@ -175,7 +175,7 @@ def get_post_by_id(post_id):
 def get_todays_posts():
     """Get all approved posts from today"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         # Handle date functions for both databases
         if db_conn.use_postgresql:
@@ -201,7 +201,7 @@ def get_todays_posts():
 def get_todays_posts_with_media():
     """Get all approved posts from today including media information"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         # Handle date functions for both databases
         if db_conn.use_postgresql:
@@ -231,7 +231,7 @@ def get_todays_posts_with_media():
 def get_post_with_media(post_id):
     """Get a specific post by ID including media information"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(f'''
@@ -254,7 +254,7 @@ def get_post_with_media(post_id):
 def get_recent_posts_with_media(limit=10):
     """Get recent approved posts including media information"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(f'''
@@ -279,7 +279,7 @@ def get_recent_posts_with_media(limit=10):
 def get_pending_submissions_with_media():
     """Get all submissions pending approval including media information"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         cursor.execute('''
             SELECT post_id, content, category, timestamp, user_id, approved, 
@@ -296,7 +296,7 @@ def get_pending_submissions_with_media():
 def is_media_post(post_id):
     """Check if a post contains media"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(
@@ -309,7 +309,7 @@ def is_media_post(post_id):
 def get_media_info(post_id):
     """Get media information for a specific post"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(
@@ -338,7 +338,7 @@ def get_media_info(post_id):
 def get_user_posts(user_id, limit=20):
     """Get user's confession history"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(f'''

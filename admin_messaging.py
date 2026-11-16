@@ -3,6 +3,7 @@ from config import ADMIN_IDS, CHANNEL_ID, MINI_ADMIN_IDS
 from db_connection import get_db_connection
 from text_utils import escape_markdown_text
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from db_connection import AsyncDBWrapper
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ async def send_broadcast_message(context, admin_id, message=None, text=None, ent
     logger.info(f"Admin {admin_id} initiating broadcast message")
 
     try:
-        all_users = get_all_users()
+        all_users = (await AsyncDBWrapper.run_sync(get_all_users))
         logger.info(f"Found {len(all_users)} users to broadcast to")
     except Exception as e:
         logger.error(f"Error getting user list: {e}")
@@ -287,7 +288,7 @@ async def notify_admins_of_edited_confession(context, post_id: int, user_id: int
     logger.info(f"Notifying admins of edited confession {post_id} by user {user_id}")
     
     # Get user info
-    user_info = get_user_info(user_id)
+    user_info = (await AsyncDBWrapper.run_sync(get_user_info, user_id))
     username_text = f"@{user_info[1]}" if user_info and user_info[1] else f"User {user_id}"
     
     # Truncate content for preview
@@ -335,7 +336,7 @@ def check_message_reply_status(message_id):
     """Check if message has already been replied to and by whom"""
     try:
         db_conn = get_db_connection()
-        with db_conn.get_connection() as conn:
+        with db_conn.get_connection(readonly=True) as conn:
             cursor = conn.cursor()
             placeholder = db_conn.get_placeholder()
             cursor.execute(
@@ -399,7 +400,7 @@ def save_admin_reply(message_id, admin_id, reply):
 def get_pending_messages():
     """Get all pending user messages for admins"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         cursor.execute('''
             SELECT message_id, user_id, user_message, timestamp
@@ -412,7 +413,7 @@ def get_pending_messages():
 def get_message_by_id(message_id):
     """Get specific message by ID"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(
@@ -427,7 +428,7 @@ async def send_message_to_admins(context, user_id, message):
     
     logger.info(f"Attempting to send message from user {user_id} to admins")
     
-    message_id, error = save_user_message(user_id, message)
+    message_id, error = (await AsyncDBWrapper.run_sync(save_user_message, user_id, message))
     
     if error:
         logger.error(f"Error saving message: {error}")
@@ -496,13 +497,13 @@ async def send_message_to_admins(context, user_id, message):
 
 async def send_admin_reply_to_user(context, message_id, admin_id, reply):
     """Send admin reply to user anonymously with duplicate prevention"""
-    message_data = get_message_by_id(message_id)
+    message_data = (await AsyncDBWrapper.run_sync(get_message_by_id, message_id))
     
     if not message_data:
         return False, "Message not found"
     
     # Check if message has already been replied to
-    reply_status = check_message_reply_status(message_id)
+    reply_status = (await AsyncDBWrapper.run_sync(check_message_reply_status, message_id))
     if reply_status and reply_status['has_reply']:
         # Message already has a reply - notify about duplicate attempt
         replied_by_admin = reply_status['replied_by_admin']
@@ -514,10 +515,10 @@ async def send_admin_reply_to_user(context, message_id, admin_id, reply):
     user_id = message_data[1]  # user_id is at index 1
     
     # Save the reply with duplicate prevention
-    reply_saved = save_admin_reply(message_id, admin_id, reply)
+    reply_saved = (await AsyncDBWrapper.run_sync(save_admin_reply, message_id, admin_id, reply))
     if not reply_saved:
         # Double-check the reason for failure
-        reply_status = check_message_reply_status(message_id)
+        reply_status = (await AsyncDBWrapper.run_sync(check_message_reply_status, message_id))
         if reply_status and reply_status['has_reply']:
             replied_by_admin = reply_status['replied_by_admin']
             return False, f"Another admin (ID: {replied_by_admin}) replied to this message while you were typing"
@@ -620,7 +621,7 @@ def ignore_user_messages(user_id):
 def get_user_message_history(user_id, limit=10):
     """Get user's message history with admins - fixed version"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(f'''

@@ -6,6 +6,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from db import get_user_profile, upsert_user_profile, get_user_active_chats, get_user_pending_requests, get_blocked_users, unblock_profile_user
 from utils import escape_markdown_text
+from db_connection import AsyncDBWrapper
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +16,7 @@ async def handle_emoji_selection(update: Update, context: ContextTypes.DEFAULT_T
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
-    profile = get_user_profile(user_id)
+    profile = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
     
     if not profile:
         await query.answer("Profile not found!", show_alert=True)
@@ -26,7 +27,7 @@ async def handle_emoji_selection(update: Update, context: ContextTypes.DEFAULT_T
     emoji = "" if emoji_data == "none" else emoji_data
     
     # Update profile with new emoji
-    upsert_user_profile(
+    (await AsyncDBWrapper.run_sync(upsert_user_profile,
         user_id,
         profile['display_name'],
         emoji,
@@ -39,18 +40,18 @@ async def handle_emoji_selection(update: Update, context: ContextTypes.DEFAULT_T
         profile.get('religion', ''),
         profile.get('relationship_status', ''),
         profile.get('other_info', '')
-    )
+    ))
     
     # Show updated profile
     from bot import send_profile_overview
-    updated_profile = get_user_profile(user_id)
+    updated_profile = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
     await send_profile_overview(update, context, updated_profile)
 
 
 async def show_edit_details_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show menu for editing optional profile details."""
     user_id = update.effective_user.id
-    profile = get_user_profile(user_id)
+    profile = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
     
     # Display current values
     gender = profile.get('gender') or 'Not set'
@@ -132,7 +133,7 @@ async def handle_gender_selection(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
-    profile = get_user_profile(user_id)
+    profile = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
     
     if not profile:
         await query.answer("Profile not found!", show_alert=True)
@@ -142,7 +143,7 @@ async def handle_gender_selection(update: Update, context: ContextTypes.DEFAULT_
     gender = "" if gender_data == "none" else gender_data
     
     # Update profile with new gender
-    upsert_user_profile(
+    (await AsyncDBWrapper.run_sync(upsert_user_profile,
         user_id,
         profile['display_name'],
         profile['emoji'],
@@ -155,7 +156,7 @@ async def handle_gender_selection(update: Update, context: ContextTypes.DEFAULT_
         profile.get('religion', ''),
         profile.get('relationship_status', ''),
         profile.get('other_info', '')
-    )
+    ))
     
     await show_edit_details_menu(update, context)
 
@@ -192,7 +193,7 @@ async def handle_year_selection(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
-    profile = get_user_profile(user_id)
+    profile = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
     
     if not profile:
         await query.answer("Profile not found!", show_alert=True)
@@ -202,7 +203,7 @@ async def handle_year_selection(update: Update, context: ContextTypes.DEFAULT_TY
     year = "" if year_data == "none" else year_data
     
     # Update profile with new year
-    upsert_user_profile(
+    (await AsyncDBWrapper.run_sync(upsert_user_profile,
         user_id,
         profile['display_name'],
         profile['emoji'],
@@ -215,7 +216,7 @@ async def handle_year_selection(update: Update, context: ContextTypes.DEFAULT_TY
         profile.get('religion', ''),
         profile.get('relationship_status', ''),
         profile.get('other_info', '')
-    )
+    ))
     
     await show_edit_details_menu(update, context)
 
@@ -251,7 +252,7 @@ async def handle_relationship_selection(update: Update, context: ContextTypes.DE
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
-    profile = get_user_profile(user_id)
+    profile = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
     
     if not profile:
         await query.answer("Profile not found!", show_alert=True)
@@ -261,7 +262,7 @@ async def handle_relationship_selection(update: Update, context: ContextTypes.DE
     relationship = "" if relationship_data == "none" else relationship_data
     
     # Update profile with new relationship status
-    upsert_user_profile(
+    (await AsyncDBWrapper.run_sync(upsert_user_profile,
         user_id,
         profile['display_name'],
         profile['emoji'],
@@ -274,7 +275,7 @@ async def handle_relationship_selection(update: Update, context: ContextTypes.DE
         profile.get('religion', ''),
         relationship,
         profile.get('other_info', '')
-    )
+    ))
     
     await show_edit_details_menu(update, context)
 
@@ -282,7 +283,7 @@ async def handle_relationship_selection(update: Update, context: ContextTypes.DE
 async def show_previous_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user's previous/active chats."""
     user_id = update.effective_user.id
-    chats = get_user_active_chats(user_id)
+    chats = (await AsyncDBWrapper.run_sync(get_user_active_chats, user_id))
     
     if not chats:
         text = (
@@ -300,7 +301,7 @@ async def show_previous_chats(update: Update, context: ContextTypes.DEFAULT_TYPE
         for chat in chats[:10]:  # Limit to 10 most recent
             # Determine the other user's ID
             other_user_id = chat['user_b_id'] if chat['user_a_id'] == user_id else chat['user_a_id']
-            other_profile = get_user_profile(other_user_id)
+            other_profile = (await AsyncDBWrapper.run_sync(get_user_profile, other_user_id))
             
             if other_profile:
                 name = (other_profile.get('emoji', '') + ' ' + other_profile.get('display_name', '')).strip()
@@ -335,7 +336,7 @@ async def resume_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     from db import get_profile_contact_by_id, is_profile_blocked_either_way
     
-    contact = get_profile_contact_by_id(contact_id)
+    contact = (await AsyncDBWrapper.run_sync(get_profile_contact_by_id, contact_id))
     if not contact:
         await query.answer("Chat not found!")
         return
@@ -344,7 +345,7 @@ async def resume_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     other_user_id = contact['user_b_id'] if contact['user_a_id'] == user_id else contact['user_a_id']
     
     # Check if blocked
-    if is_profile_blocked_either_way(user_id, other_user_id):
+    if (await AsyncDBWrapper.run_sync(is_profile_blocked_either_way, user_id, other_user_id)):
         await query.edit_message_text(
             "🚫 *Chat Not Available*\\n\\n"
             "This chat is no longer available\\.",
@@ -359,7 +360,7 @@ async def resume_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Set reply mode to True so messages can be sent
     context.user_data['reply_mode_active'] = True
     
-    other_profile = get_user_profile(other_user_id)
+    other_profile = (await AsyncDBWrapper.run_sync(get_user_profile, other_user_id))
     if other_profile:
         name = (other_profile.get('emoji', '') + ' ' + other_profile.get('display_name', '')).strip()
         if not name:
@@ -405,7 +406,7 @@ async def resume_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user's inbox with pending contact requests."""
     user_id = update.effective_user.id
-    pending_requests = get_user_pending_requests(user_id)
+    pending_requests = (await AsyncDBWrapper.run_sync(get_user_pending_requests, user_id))
     
     if not pending_requests:
         text = (
@@ -423,7 +424,7 @@ async def show_inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for request in pending_requests[:10]:  # Limit to 10 most recent
             # Determine the requester (initiator)
             requester_id = request['initiator_id']
-            requester_profile = get_user_profile(requester_id)
+            requester_profile = (await AsyncDBWrapper.run_sync(get_user_profile, requester_id))
             
             if requester_profile:
                 name = (requester_profile.get('emoji', '') + ' ' + requester_profile.get('display_name', '')).strip()
@@ -461,7 +462,7 @@ async def show_contact_request_detail(update: Update, context: ContextTypes.DEFA
     
     from db import get_profile_contact_by_id
     
-    contact = get_profile_contact_by_id(contact_id)
+    contact = (await AsyncDBWrapper.run_sync(get_profile_contact_by_id, contact_id))
     if not contact or contact['status'] != 'pending':
         await query.edit_message_text(
             "❗ *Request Not Available*\\n\\n"
@@ -475,7 +476,7 @@ async def show_contact_request_detail(update: Update, context: ContextTypes.DEFA
     
     # Get requester info
     requester_id = contact['initiator_id']
-    requester_profile = get_user_profile(requester_id)
+    requester_profile = (await AsyncDBWrapper.run_sync(get_user_profile, requester_id))
     
     if requester_profile:
         name_raw = (requester_profile.get('emoji', '') + ' ' + requester_profile.get('display_name', '')).strip()
@@ -519,7 +520,7 @@ async def show_contact_request_detail(update: Update, context: ContextTypes.DEFA
 async def show_friends(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user's friends list (active contacts)."""
     user_id = update.effective_user.id
-    friends = get_user_active_chats(user_id)
+    friends = (await AsyncDBWrapper.run_sync(get_user_active_chats, user_id))
     
     if not friends:
         text = (
@@ -539,7 +540,7 @@ async def show_friends(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for friend in friends[:20]:  # Limit to 20 most recent
             # Determine the friend's ID
             friend_id = friend['user_b_id'] if friend['user_a_id'] == user_id else friend['user_a_id']
-            friend_profile = get_user_profile(friend_id)
+            friend_profile = (await AsyncDBWrapper.run_sync(get_user_profile, friend_id))
             
             if friend_profile:
                 name = (friend_profile.get('emoji', '') + ' ' + friend_profile.get('display_name', '')).strip()
@@ -575,7 +576,7 @@ async def show_friend_detail(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     from db import get_profile_contact_by_id, is_profile_blocked_either_way
     
-    contact = get_profile_contact_by_id(contact_id)
+    contact = (await AsyncDBWrapper.run_sync(get_profile_contact_by_id, contact_id))
     if not contact or contact['status'] != 'active':
         await query.edit_message_text(
             "❗ *Friend Not Available*\\n\\n"
@@ -591,7 +592,7 @@ async def show_friend_detail(update: Update, context: ContextTypes.DEFAULT_TYPE)
     friend_id = contact['user_b_id'] if contact['user_a_id'] == user_id else contact['user_a_id']
     
     # Check if blocked
-    if is_profile_blocked_either_way(user_id, friend_id):
+    if (await AsyncDBWrapper.run_sync(is_profile_blocked_either_way, user_id, friend_id)):
         await query.edit_message_text(
             "🚫 *Cannot View Friend*\\n\\n"
             "This user is blocked\\.",
@@ -602,7 +603,7 @@ async def show_friend_detail(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
     
-    friend_profile = get_user_profile(friend_id)
+    friend_profile = (await AsyncDBWrapper.run_sync(get_user_profile, friend_id))
     
     if friend_profile:
         name_raw = (friend_profile.get('emoji', '') + ' ' + friend_profile.get('display_name', '')).strip()
@@ -647,7 +648,7 @@ async def show_friend_detail(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def show_blocked_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show list of blocked users with unblock option."""
     user_id = update.effective_user.id
-    blocked_list = get_blocked_users(user_id)
+    blocked_list = (await AsyncDBWrapper.run_sync(get_blocked_users, user_id))
     
     if not blocked_list:
         text = (
@@ -665,7 +666,7 @@ async def show_blocked_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
         buttons = []
         for block in blocked_list[:20]:  # Limit to 20
             blocked_id = block['blocked_id']
-            blocked_profile = get_user_profile(blocked_id)
+            blocked_profile = (await AsyncDBWrapper.run_sync(get_user_profile, blocked_id))
             
             if blocked_profile:
                 name = (blocked_profile.get('emoji', '') + ' ' + blocked_profile.get('display_name', '')).strip()
@@ -699,7 +700,7 @@ async def show_blocked_user_detail(update: Update, context: ContextTypes.DEFAULT
     # Extract blocked user ID from callback data
     blocked_id = int(query.data.replace("view_blocked_", ""))
     
-    blocked_profile = get_user_profile(blocked_id)
+    blocked_profile = (await AsyncDBWrapper.run_sync(get_user_profile, blocked_id))
     
     if blocked_profile:
         name_raw = (blocked_profile.get('emoji', '') + ' ' + blocked_profile.get('display_name', '')).strip()

@@ -56,7 +56,7 @@ class SearchManager:
         db_conn = get_db_connection()
         placeholder = db_conn.get_placeholder()
         
-        with db_conn.get_connection() as conn:
+        with db_conn.get_connection(readonly=True) as conn:
             cursor = conn.cursor()
             
             # Base query for user information with activity counts
@@ -149,7 +149,7 @@ class SearchManager:
         db_conn = get_db_connection()
         placeholder = db_conn.get_placeholder()
         
-        with db_conn.get_connection() as conn:
+        with db_conn.get_connection(readonly=True) as conn:
             cursor = conn.cursor()
             
             # Get user basic info
@@ -250,7 +250,7 @@ class SearchManager:
         placeholder = db_conn.get_placeholder()
         results = []
         
-        with db_conn.get_connection() as conn:
+        with db_conn.get_connection(readonly=True) as conn:
             cursor = conn.cursor()
             
             # Search posts
@@ -355,7 +355,7 @@ class SearchManager:
         placeholder = db_conn.get_placeholder()
         offset = (page - 1) * per_page
         
-        with db_conn.get_connection() as conn:
+        with db_conn.get_connection(readonly=True) as conn:
             cursor = conn.cursor()
             
             # Get total count
@@ -405,7 +405,7 @@ class SearchManager:
         placeholder = db_conn.get_placeholder()
         offset = (page - 1) * per_page
         
-        with db_conn.get_connection() as conn:
+        with db_conn.get_connection(readonly=True) as conn:
             cursor = conn.cursor()
             
             # Get total count
@@ -453,7 +453,7 @@ class SearchManager:
         db_conn = get_db_connection()
         placeholder = db_conn.get_placeholder()
         
-        with db_conn.get_connection() as conn:
+        with db_conn.get_connection(readonly=True) as conn:
             cursor = conn.cursor()
             
             # Get most liked post
@@ -658,7 +658,7 @@ class ExportManager:
             db_conn = get_db_connection()
             placeholder = db_conn.get_placeholder()
             
-            with db_conn.get_connection() as conn:
+            with db_conn.get_connection(readonly=True) as conn:
                 cursor = conn.cursor()
                 
                 query = f"""

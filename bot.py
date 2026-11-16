@@ -354,6 +354,11 @@ async def show_menu(update, context, text="What would you like to do next?"):
             reply_markup=ReplyKeyboardMarkup(menu, resize_keyboard=True)
         )
 
+# Members who passed the channel check recently skip the Telegram round trip.
+_channel_member_seen = {}
+CHANNEL_MEMBER_CACHE_SECONDS = 600
+
+
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command and deep links - optimized with context tracking"""
     import time
@@ -367,12 +372,17 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # In private chat, require that the user is a member of the channel before continuing
     if chat.type == "private":
-        try:
-            member = await context.bot.get_chat_member(CHANNEL_ID, user.id)
-            status = getattr(member, "status", None)
-        except Exception as e:
-            logger.error(f"Error checking channel membership for user {user.id}: {e}")
-            status = None
+        if time.time() - _channel_member_seen.get(user.id, 0) < CHANNEL_MEMBER_CACHE_SECONDS:
+            status = "member"
+        else:
+            try:
+                member = await context.bot.get_chat_member(CHANNEL_ID, user.id)
+                status = getattr(member, "status", None)
+            except Exception as e:
+                logger.error(f"Error checking channel membership for user {user.id}: {e}")
+                status = None
+            if status in ("member", "administrator", "creator"):
+                _channel_member_seen[user.id] = time.time()
 
         if status not in ("member", "administrator", "creator"):
             # Try to build a join link: prefer CHANNEL_JOIN_LINK from config, fall back to channel username if available
@@ -614,7 +624,7 @@ async def handle_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def my_profile_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Entry point for the "👤 My Profile" menu option."""
     user = update.effective_user
-    profile = get_user_profile(user.id)
+    profile = (await AsyncDBWrapper.run_sync(get_user_profile, user.id))
 
     # If no profile exists, start the create wizard directly
     if not profile:
@@ -731,7 +741,7 @@ async def send_profile_overview(update: Update, context: ContextTypes.DEFAULT_TY
 async def show_profile_edit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show the edit profile menu with options for Name, Emoji, Bio, and Details."""
     user_id = update.effective_user.id
-    profile = get_user_profile(user_id)
+    profile = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
     
     text = (
         "✏️ *Edit Profile*\n\n"
@@ -960,7 +970,7 @@ async def handle_profile_text_input(update: Update, context: ContextTypes.DEFAUL
     # New detail fields
     if profile_state == 'editing_age':
         user_id = update.effective_user.id
-        profile = get_user_profile(user_id)
+        profile = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
         if not profile:
             return
             
@@ -982,13 +992,13 @@ async def handle_profile_text_input(update: Update, context: ContextTypes.DEFAUL
                 )
                 return
             
-        upsert_user_profile(
+        (await AsyncDBWrapper.run_sync(upsert_user_profile,
             user_id, profile['display_name'], profile['emoji'], profile['bio'],
             profile['is_active'], profile.get('gender', ''), age,
             profile.get('department', ''), profile.get('year', ''),
             profile.get('religion', ''), profile.get('relationship_status', ''),
             profile.get('other_info', '')
-        )
+        ))
         context.user_data.pop('profile_state', None)
         context.user_data.pop('state', None)
         await update.message.reply_text(
@@ -1001,7 +1011,7 @@ async def handle_profile_text_input(update: Update, context: ContextTypes.DEFAUL
     # Handle editing name from edit menu (not creation wizard)
     if profile_state == 'editing_name_only':
         user_id = update.effective_user.id
-        profile = get_user_profile(user_id)
+        profile = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
         if not profile:
             return
         
@@ -1012,13 +1022,13 @@ async def handle_profile_text_input(update: Update, context: ContextTypes.DEFAUL
             )
             return
         
-        upsert_user_profile(
+        (await AsyncDBWrapper.run_sync(upsert_user_profile,
             user_id, text, profile['emoji'], profile['bio'],
             profile['is_active'], profile.get('gender', ''), profile.get('age'),
             profile.get('department', ''), profile.get('year', ''),
             profile.get('religion', ''), profile.get('relationship_status', ''),
             profile.get('other_info', '')
-        )
+        ))
         context.user_data.pop('profile_state', None)
         context.user_data.pop('state', None)
         await update.message.reply_text(
@@ -1026,14 +1036,14 @@ async def handle_profile_text_input(update: Update, context: ContextTypes.DEFAUL
             parse_mode="MarkdownV2"
         )
         # Show updated profile
-        updated_profile = get_user_profile(user_id)
+        updated_profile = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
         await send_profile_overview(update, context, updated_profile)
         return
     
     # Handle editing bio from edit menu (not creation wizard)
     if profile_state == 'editing_bio_only':
         user_id = update.effective_user.id
-        profile = get_user_profile(user_id)
+        profile = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
         if not profile:
             return
         
@@ -1048,13 +1058,13 @@ async def handle_profile_text_input(update: Update, context: ContextTypes.DEFAUL
                 return
             bio = text
         
-        upsert_user_profile(
+        (await AsyncDBWrapper.run_sync(upsert_user_profile,
             user_id, profile['display_name'], profile['emoji'], bio,
             profile['is_active'], profile.get('gender', ''), profile.get('age'),
             profile.get('department', ''), profile.get('year', ''),
             profile.get('religion', ''), profile.get('relationship_status', ''),
             profile.get('other_info', '')
-        )
+        ))
         context.user_data.pop('profile_state', None)
         context.user_data.pop('state', None)
         await update.message.reply_text(
@@ -1062,25 +1072,25 @@ async def handle_profile_text_input(update: Update, context: ContextTypes.DEFAUL
             parse_mode="MarkdownV2"
         )
         # Show updated profile
-        updated_profile = get_user_profile(user_id)
+        updated_profile = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
         await send_profile_overview(update, context, updated_profile)
         return
         
     if profile_state == 'editing_department':
         user_id = update.effective_user.id
-        profile = get_user_profile(user_id)
+        profile = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
         if not profile:
             return
             
         department = '' if text.lower() in {"skip", "none", "-"} else text[:100]
             
-        upsert_user_profile(
+        (await AsyncDBWrapper.run_sync(upsert_user_profile,
             user_id, profile['display_name'], profile['emoji'], profile['bio'],
             profile['is_active'], profile.get('gender', ''), profile.get('age'),
             department, profile.get('year', ''),
             profile.get('religion', ''), profile.get('relationship_status', ''),
             profile.get('other_info', '')
-        )
+        ))
         context.user_data.pop('profile_state', None)
         context.user_data.pop('state', None)
         await update.message.reply_text(
@@ -1092,19 +1102,19 @@ async def handle_profile_text_input(update: Update, context: ContextTypes.DEFAUL
         
     if profile_state == 'editing_religion':
         user_id = update.effective_user.id
-        profile = get_user_profile(user_id)
+        profile = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
         if not profile:
             return
             
         religion = '' if text.lower() in {"skip", "none", "-"} else text[:50]
             
-        upsert_user_profile(
+        (await AsyncDBWrapper.run_sync(upsert_user_profile,
             user_id, profile['display_name'], profile['emoji'], profile['bio'],
             profile['is_active'], profile.get('gender', ''), profile.get('age'),
             profile.get('department', ''), profile.get('year', ''),
             religion, profile.get('relationship_status', ''),
             profile.get('other_info', '')
-        )
+        ))
         context.user_data.pop('profile_state', None)
         context.user_data.pop('state', None)
         await update.message.reply_text(
@@ -1116,19 +1126,19 @@ async def handle_profile_text_input(update: Update, context: ContextTypes.DEFAUL
         
     if profile_state == 'editing_other_info':
         user_id = update.effective_user.id
-        profile = get_user_profile(user_id)
+        profile = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
         if not profile:
             return
             
         other_info = '' if text.lower() in {"skip", "none", "-"} else text[:500]
             
-        upsert_user_profile(
+        (await AsyncDBWrapper.run_sync(upsert_user_profile,
             user_id, profile['display_name'], profile['emoji'], profile['bio'],
             profile['is_active'], profile.get('gender', ''), profile.get('age'),
             profile.get('department', ''), profile.get('year', ''),
             profile.get('religion', ''), profile.get('relationship_status', ''),
             other_info
-        )
+        ))
         context.user_data.pop('profile_state', None)
         context.user_data.pop('state', None)
         await update.message.reply_text(
@@ -2132,7 +2142,7 @@ async def handle_media_submission(update: Update, context: ContextTypes.DEFAULT_
         return
     
     # For media-only posts, save immediately
-    post_id, error = save_submission(user_id, media_data.get('caption'), category, media_data)
+    post_id, error = (await AsyncDBWrapper.run_sync(save_submission, user_id, media_data.get('caption'), category, media_data))
     
     if error:
         await update.message.reply_text(f"❗ Error saving confession: {error}")
@@ -2184,7 +2194,7 @@ async def handle_text_after_media(update: Update, context: ContextTypes.DEFAULT_
         return
     
     # Save the combo submission
-    post_id, error = save_submission(user_id, content, category, media_data)
+    post_id, error = (await AsyncDBWrapper.run_sync(save_submission, user_id, content, category, media_data))
     
     if error:
         await update.message.reply_text(f"❗ Error saving confession: {error}")
@@ -2328,7 +2338,7 @@ async def show_most_commented_posts(update: Update, context: ContextTypes.DEFAUL
     """Show most commented posts from last 24 hours"""
     from trending import get_most_commented_posts_24h
     
-    most_commented = get_most_commented_posts_24h(8)
+    most_commented = (await AsyncDBWrapper.run_sync(get_most_commented_posts_24h, 8))
     
     if not most_commented:
         await update.callback_query.edit_message_text(
@@ -2407,7 +2417,7 @@ async def show_rising_posts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show hot and rising posts"""
     from trending import get_rising_posts
     
-    rising = get_rising_posts(8)
+    rising = (await AsyncDBWrapper.run_sync(get_rising_posts, 8))
     
     if not rising:
         await update.callback_query.edit_message_text(
@@ -2489,7 +2499,7 @@ async def show_most_liked_posts(update: Update, context: ContextTypes.DEFAULT_TY
     """Show posts with most liked comments"""
     from trending import get_posts_with_most_liked_comments
     
-    liked_posts = get_posts_with_most_liked_comments(8)
+    liked_posts = (await AsyncDBWrapper.run_sync(get_posts_with_most_liked_comments, 8))
     
     if not liked_posts:
         await update.callback_query.edit_message_text(
@@ -2569,7 +2579,7 @@ async def show_all_trending_posts(update: Update, context: ContextTypes.DEFAULT_
     """Show all trending posts using combined algorithm"""
     from trending import get_trending_posts
     
-    trending = get_trending_posts(10)
+    trending = (await AsyncDBWrapper.run_sync(get_trending_posts, 10))
     
     if not trending:
         await update.callback_query.edit_message_text(
@@ -2684,8 +2694,8 @@ async def popular_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from trending import get_popular_today_posts, get_posts_with_most_liked_comments
     
     # Get today's popular posts
-    popular = get_popular_today_posts(10)
-    liked_posts = get_posts_with_most_liked_comments(8)
+    popular = (await AsyncDBWrapper.run_sync(get_popular_today_posts, 10))
+    liked_posts = (await AsyncDBWrapper.run_sync(get_posts_with_most_liked_comments, 8))
     
     if not popular and not liked_posts:
         await update.message.reply_text(
@@ -2819,7 +2829,7 @@ async def popular_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def recent_posts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show recent approved confessions"""
     try:
-        posts = get_recent_posts_with_media(10)
+        posts = (await AsyncDBWrapper.run_sync(get_recent_posts_with_media, 10))
         
         if not posts:
             await update.message.reply_text("📰 No approved confessions available yet.")
@@ -2891,7 +2901,7 @@ async def recent_posts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_post_for_commenting(update: Update, context: ContextTypes.DEFAULT_TYPE, post_id: int):
     """Show direct comment interface (from 'Add Comment' deep link)"""
-    post = get_post_by_id(post_id)
+    post = (await AsyncDBWrapper.run_sync(get_post_by_id, post_id))
     if not post or post[5] != 1:  # Check if approved (approved field is at index 5, value 1 = approved)
         if update.message:
             await update.message.reply_text("❗ Post not found or not available.")
@@ -2944,7 +2954,14 @@ async def show_comments_directly(update: Update, context: ContextTypes.DEFAULT_T
     """Show comments directly via deep link"""
     try:
         logger.info(f"show_comments_directly called with post_id: {post_id}")
-        post = await AsyncDBWrapper.run_sync(get_post_by_id, post_id)
+        from comments import build_comments_page
+        post, page_data = await asyncio.gather(
+            AsyncDBWrapper.run_sync(get_post_by_id, post_id),
+            AsyncDBWrapper.run_sync(build_comments_page, post_id, 1, update.effective_user.id),
+            return_exceptions=True,
+        )
+        if isinstance(post, Exception):
+            raise post
         logger.info(f"Retrieved post: {post}")
         
         if not post or post[5] != 1:  # Check if approved (approved field is at index 5, value 1 = approved)
@@ -2963,10 +2980,9 @@ async def show_comments_directly(update: Update, context: ContextTypes.DEFAULT_T
     # Show comments starting from page 1
     try:
         logger.info(f"Getting paginated comments for post_id: {post_id}")
-        from comments import build_comments_page
-        comment_messages, current_page, total_pages, total_comments = await AsyncDBWrapper.run_sync(
-            build_comments_page, post_id, 1, update.effective_user.id
-        )
+        if isinstance(page_data, Exception):
+            raise page_data
+        comment_messages, current_page, total_pages, total_comments = page_data
         logger.info(f"Retrieved comments: data={len(comment_messages)}, current_page={current_page}, total_pages={total_pages}, total_comments={total_comments}")
     except Exception as e:
         logger.error(f"Error getting paginated comments: {e}")
@@ -3040,14 +3056,14 @@ async def show_sensitive_confession(update: Update, context: ContextTypes.DEFAUL
     """Show full sensitive confession privately with comment actions (via deep link) - supports media"""
     from db import is_post_sensitive
 
-    post = get_post_by_id(post_id)
+    post = (await AsyncDBWrapper.run_sync(get_post_by_id, post_id))
     if not post or post[5] != 1:  # approved field is at index 5
         await update.message.reply_text("❗ Post not found or not available.")
         await show_menu(update, context)
         return
 
     # If not marked sensitive, still allow viewing but note it
-    sensitive = is_post_sensitive(post_id)
+    sensitive = (await AsyncDBWrapper.run_sync(is_post_sensitive, post_id))
 
     content = post[1]
     category = post[2]
@@ -3553,7 +3569,7 @@ async def handle_comment_submission(update: Update, context: ContextTypes.DEFAUL
 async def my_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show comprehensive user statistics"""
     user_id = update.effective_user.id
-    stats = get_user_stats(user_id)
+    stats = (await AsyncDBWrapper.run_sync(get_user_stats, user_id))
     
     if not stats:
         await update.message.reply_text("❗ No statistics available. Submit your first confession!")
@@ -3827,7 +3843,7 @@ async def back_to_stats_callback(update: Update, context: ContextTypes.DEFAULT_T
     
     # Simulate calling my_stats but through callback
     user_id = update.effective_user.id
-    stats = get_user_stats(user_id)
+    stats = (await AsyncDBWrapper.run_sync(get_user_stats, user_id))
     
     if not stats:
         await query.edit_message_text("❗ No statistics available.")
@@ -3876,7 +3892,7 @@ async def edit_my_post_callback(update: Update, context: ContextTypes.DEFAULT_TY
     
     # Verify ownership
     from db import get_user_posts
-    posts = get_user_posts(user_id, 100)  # Get all user posts
+    posts = (await AsyncDBWrapper.run_sync(get_user_posts, user_id, 100))  # Get all user posts
     
     post_found = None
     for post in posts:
@@ -3981,7 +3997,7 @@ async def handle_post_edit_content(update: Update, context: ContextTypes.DEFAULT
     
     # Update the post
     from db import update_user_post
-    success = update_user_post(post_id, user_id, new_content)
+    success = (await AsyncDBWrapper.run_sync(update_user_post, post_id, user_id, new_content))
     
     if success:
         # Notify admins about the edit (only if it was previously approved)
@@ -4138,7 +4154,7 @@ async def handle_admin_reply_message(update: Update, context: ContextTypes.DEFAU
 async def daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show today's confessions individually with media support"""
     from submission import get_todays_posts_with_media
-    posts = get_todays_posts_with_media()
+    posts = (await AsyncDBWrapper.run_sync(get_todays_posts_with_media))
     
     if not posts:
         await update.message.reply_text("📅 No confessions posted today yet\\. Check back later\\!", parse_mode="MarkdownV2")
@@ -4646,7 +4662,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("unblock_user_"):
         from db import unblock_profile_user
         blocked_id = int(data.replace("unblock_user_", ""))
-        unblock_profile_user(user_id, blocked_id)
+        (await AsyncDBWrapper.run_sync(unblock_profile_user, user_id, blocked_id))
         await query.edit_message_text(
             "✅ *User Unblocked*\n\n"
             "This user has been unblocked and can now contact you again\\.",
@@ -4746,7 +4762,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if data.startswith("profile_reply_"):
             contact_id = int(data.replace("profile_reply_", ""))
             # Set up chat session for replying
-            contact = get_profile_contact_by_id(contact_id)
+            contact = (await AsyncDBWrapper.run_sync(get_profile_contact_by_id, contact_id))
             if contact and contact.get('status') == 'active':
                 user_id = update.effective_user.id
                 partner_id = contact['user_a_id'] if contact['user_a_id'] != user_id else contact['user_b_id']
@@ -4775,7 +4791,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except ValueError:
                 await query.answer("Invalid block data")
                 return
-            block_profile_user(user_id, target_user_id)
+            (await AsyncDBWrapper.run_sync(block_profile_user, user_id, target_user_id))
             await query.edit_message_text(
                 "🚫 You blocked this user\\. They won't be able to contact you through profiles\\.",
                 parse_mode="MarkdownV2",
@@ -4805,7 +4821,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Start edit wizard from overview
         if data == "profile_edit":
-            existing = get_user_profile(user_id)
+            existing = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
             await start_profile_edit_wizard(update, context, existing_profile=existing)
             return
         
@@ -4968,9 +4984,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Remove friend (end active contact)
         if data.startswith("remove_friend_"):
             contact_id = int(data.replace("remove_friend_", ""))
-            contact = get_profile_contact_by_id(contact_id)
+            contact = (await AsyncDBWrapper.run_sync(get_profile_contact_by_id, contact_id))
             if contact:
-                update_profile_contact_status(contact_id, 'ended')
+                (await AsyncDBWrapper.run_sync(update_profile_contact_status, contact_id, 'ended'))
                 await query.edit_message_text(
                     "💔 *Friend Removed*\n\n"
                     "This user has been removed from your friends list\\.",
@@ -4996,11 +5012,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Block user from a contact request
         if data.startswith("profile_block_requester_"):
             contact_id = int(data.replace("profile_block_requester_", ""))
-            contact = get_profile_contact_by_id(contact_id)
+            contact = (await AsyncDBWrapper.run_sync(get_profile_contact_by_id, contact_id))
             if contact:
                 requester_id = contact['initiator_id']
-                block_profile_user(user_id, requester_id)
-                update_profile_contact_status(contact_id, 'declined')
+                (await AsyncDBWrapper.run_sync(block_profile_user, user_id, requester_id))
+                (await AsyncDBWrapper.run_sync(update_profile_contact_status, contact_id, 'declined'))
                 await query.edit_message_text(
                     "🚫 *User Blocked*\n\n"
                     "This user has been blocked and the request declined\\.",
@@ -5025,7 +5041,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Back to profile
         if data == "back_to_profile":
-            profile = get_user_profile(user_id)
+            profile = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
             if profile:
                 await send_profile_overview(update, context, profile)
             else:
@@ -5034,16 +5050,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Visibility toggles
         if data == "profile_visibility_on":
-            set_profile_visibility(user_id, True)
-            profile = get_user_profile(user_id)
+            (await AsyncDBWrapper.run_sync(set_profile_visibility, user_id, True))
+            profile = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
             if profile:
                 await send_profile_overview(update, context, profile)
             else:
                 await my_profile_entry(update, context)
             return
         if data == "profile_visibility_off":
-            set_profile_visibility(user_id, False)
-            profile = get_user_profile(user_id)
+            (await AsyncDBWrapper.run_sync(set_profile_visibility, user_id, False))
+            profile = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
             if profile:
                 await send_profile_overview(update, context, profile)
             else:
@@ -5052,16 +5068,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Accepting contacts toggles
         if data == "profile_accepting_on":
-            set_profile_accepting_contacts(user_id, True)
-            profile = get_user_profile(user_id)
+            (await AsyncDBWrapper.run_sync(set_profile_accepting_contacts, user_id, True))
+            profile = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
             if profile:
                 await send_profile_overview(update, context, profile)
             else:
                 await my_profile_entry(update, context)
             return
         if data == "profile_accepting_off":
-            set_profile_accepting_contacts(user_id, False)
-            profile = get_user_profile(user_id)
+            (await AsyncDBWrapper.run_sync(set_profile_accepting_contacts, user_id, False))
+            profile = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
             if profile:
                 await send_profile_overview(update, context, profile)
             else:
@@ -5085,7 +5101,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if data == "profile_delete_confirm":
             from db import delete_user_profile
 
-            if delete_user_profile(user_id):
+            if (await AsyncDBWrapper.run_sync(delete_user_profile, user_id)):
                 # Clear wizard state
                 context.user_data.pop('profile_state', None)
                 context.user_data.pop('profile_draft', None)
@@ -5109,22 +5125,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await my_profile_entry(update, context)
                 return
 
-            existing = get_user_profile(user_id)
+            existing = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
             is_active = existing['is_active'] if existing else True
-            upsert_user_profile(
+            (await AsyncDBWrapper.run_sync(upsert_user_profile,
                 user_id,
                 draft.get('display_name', ''),
                 draft.get('emoji', ''),
                 draft.get('bio', ''),
                 is_active=is_active,
-            )
+            ))
 
             # Clear wizard state
             context.user_data.pop('profile_state', None)
             context.user_data.pop('profile_draft', None)
             context.user_data.pop('state', None)
 
-            profile = get_user_profile(user_id)
+            profile = (await AsyncDBWrapper.run_sync(get_user_profile, user_id))
             await send_profile_overview(update, context, profile)
             return
 
@@ -5593,11 +5609,11 @@ Select a category below:
         
         if comment_id:
             admin_user_id = query.from_user.id
-            success, replacement_stats = replace_comment_with_message(
+            success, replacement_stats = (await AsyncDBWrapper.run_sync(replace_comment_with_message,
                 comment_id=comment_id,
                 admin_user_id=admin_user_id,
                 replacement_message="[This comment has been removed by moderators due to reports]"
-            )
+            ))
             
             if success:
                 await query.answer("✅ Comment replaced with removal notice")
@@ -5696,7 +5712,7 @@ async def handle_admin_reply_callback(update: Update, context: ContextTypes.DEFA
     
     # Check if message has already been replied to
     from admin_messaging import check_message_reply_status
-    reply_status = check_message_reply_status(message_id)
+    reply_status = (await AsyncDBWrapper.run_sync(check_message_reply_status, message_id))
     
     if reply_status and reply_status['has_reply']:
         replied_by_admin = reply_status['replied_by_admin']
@@ -5741,7 +5757,7 @@ async def handle_admin_history_callback(update: Update, context: ContextTypes.DE
     
     try:
         from admin_messaging import get_user_message_history
-        history = get_user_message_history(sender_user_id)
+        history = (await AsyncDBWrapper.run_sync(get_user_message_history, sender_user_id))
         
         if not history:
             await query.answer("📋 No message history found for this user.")
@@ -5787,7 +5803,7 @@ async def handle_admin_read_callback(update: Update, context: ContextTypes.DEFAU
     
     try:
         from admin_messaging import mark_message_as_read
-        success = mark_message_as_read(message_id)
+        success = (await AsyncDBWrapper.run_sync(mark_message_as_read, message_id))
         
         if success:
             await query.answer("✅ Message marked as read!")
@@ -5817,7 +5833,7 @@ async def handle_admin_ignore_callback(update: Update, context: ContextTypes.DEF
     
     try:
         from admin_messaging import ignore_user_messages
-        success = ignore_user_messages(sender_user_id)
+        success = (await AsyncDBWrapper.run_sync(ignore_user_messages, sender_user_id))
         
         if success:
             await query.answer("🔇 User messages will be ignored!")
@@ -5875,7 +5891,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❗ You are not authorized to use admin commands.")
         return
     
-    stats = get_channel_stats()
+    stats = (await AsyncDBWrapper.run_sync(get_channel_stats))
     
     stats_text = f"""
 📊 *Channel Statistics*
@@ -5904,7 +5920,7 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❗ You are not authorized to use admin commands.")
         return
     
-    pending_posts = get_pending_submissions()
+    pending_posts = (await AsyncDBWrapper.run_sync(get_pending_submissions))
     
     if not pending_posts:
         await update.message.reply_text("✅ No pending submissions.")
@@ -5950,7 +5966,7 @@ async def messages_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❗ You are not authorized to use admin commands.")
         return
     
-    pending_messages = get_pending_messages()
+    pending_messages = (await AsyncDBWrapper.run_sync(get_pending_messages))
     
     if not pending_messages:
         await update.message.reply_text("✅ No pending user messages.")
@@ -6106,7 +6122,7 @@ async def reports_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     from moderation import get_reports
-    reports = get_reports()
+    reports = (await AsyncDBWrapper.run_sync(get_reports))
     
     if not reports:
         await update.message.reply_text("✅ No reports found.")
@@ -6128,7 +6144,7 @@ async def reports_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Get content details
         from moderation import get_content_details
-        content_details = get_content_details(target_type, target_id)
+        content_details = (await AsyncDBWrapper.run_sync(get_content_details, target_type, target_id))
         
         if content_details:
             if target_type == 'comment':
@@ -6168,7 +6184,7 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target_user_id = int(context.args[0])
             
             db_conn = get_db_connection()
-            with db_conn.get_connection() as conn:
+            with db_conn.get_connection(readonly=True) as conn:
                 cursor = conn.cursor()
                 placeholder = db_conn.get_placeholder()
                 cursor.execute(
@@ -6251,7 +6267,7 @@ async def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❗ User {target_user_id} is already blocked.")
             return
         
-        block_user(target_user_id)
+        (await AsyncDBWrapper.run_sync(block_user, target_user_id))
         await update.message.reply_text(f"⛔ User {target_user_id} has been blocked.")
         
     except ValueError:
@@ -6279,7 +6295,7 @@ async def unblock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❗ User {target_user_id} is not blocked.")
             return
         
-        unblock_user(target_user_id)
+        (await AsyncDBWrapper.run_sync(unblock_user, target_user_id))
         await update.message.reply_text(f"✅ User {target_user_id} has been unblocked.")
         
     except ValueError:
@@ -6296,7 +6312,7 @@ async def blocked_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT user_id, username, first_name, last_name, join_date FROM users WHERE blocked = 1 ORDER BY join_date DESC"
@@ -6337,9 +6353,9 @@ async def admin_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Get quick stats
-    stats = get_channel_stats()
-    pending_posts = len(get_pending_submissions())
-    pending_messages = len(get_pending_messages())
+    stats = (await AsyncDBWrapper.run_sync(get_channel_stats))
+    pending_posts = len((await AsyncDBWrapper.run_sync(get_pending_submissions)))
+    pending_messages = len((await AsyncDBWrapper.run_sync(get_pending_messages)))
     
     dashboard_text = f"""
 🔧 *Admin Dashboard*
@@ -6392,11 +6408,11 @@ async def admin_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Get comprehensive analytics
-    stats = get_channel_stats()
+    stats = (await AsyncDBWrapper.run_sync(get_channel_stats))
     
     # Get additional analytics
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         
         # Get user activity trends (last 7 days)
@@ -6505,7 +6521,7 @@ async def admin_user_management(update: Update, context: ContextTypes.DEFAULT_TY
     
     # Get user statistics
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         
         # Total users
@@ -6573,7 +6589,7 @@ async def admin_blocked_users(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT user_id, username, first_name, last_name, join_date, questions_asked, comments_posted
@@ -6635,7 +6651,7 @@ async def admin_active_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT user_id, username, first_name, last_name, join_date, questions_asked, comments_posted
@@ -6686,9 +6702,9 @@ async def admin_dashboard_callback(update: Update, context: ContextTypes.DEFAULT
         return
     
     # Get quick stats
-    stats = get_channel_stats()
-    pending_posts = len(get_pending_submissions())
-    pending_messages = len(get_pending_messages())
+    stats = (await AsyncDBWrapper.run_sync(get_channel_stats))
+    pending_posts = len((await AsyncDBWrapper.run_sync(get_pending_submissions)))
+    pending_messages = len((await AsyncDBWrapper.run_sync(get_pending_messages)))
     
     dashboard_text = f"""
 🔧 *Admin Dashboard*
@@ -6746,7 +6762,7 @@ async def admin_unblock_user_callback(update: Update, context: ContextTypes.DEFA
             await query.answer("❗ User is not blocked!")
             return
         
-        unblock_user(target_user_id)
+        (await AsyncDBWrapper.run_sync(unblock_user, target_user_id))
         await query.answer(f"✅ User {target_user_id} unblocked!")
         
         # Refresh the blocked users list
@@ -6774,7 +6790,7 @@ async def admin_block_user_callback(update: Update, context: ContextTypes.DEFAUL
             await query.answer("❗ User is already blocked!")
             return
         
-        block_user(target_user_id)
+        (await AsyncDBWrapper.run_sync(block_user, target_user_id))
         await query.answer(f"⛔ User {target_user_id} blocked!")
         
         # Refresh the active users list
@@ -6796,7 +6812,7 @@ async def admin_user_info_callback(update: Update, context: ContextTypes.DEFAULT
     target_user_id = int(query.data.replace("admin_user_info_", ""))
     
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(
@@ -6865,7 +6881,7 @@ async def admin_pending_posts(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     
     from submission import get_pending_submissions_with_media
-    pending_posts = get_pending_submissions_with_media()
+    pending_posts = (await AsyncDBWrapper.run_sync(get_pending_submissions_with_media))
     
     if not pending_posts:
         await query.edit_message_text(
@@ -7022,7 +7038,7 @@ async def admin_pending_posts(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("❗ Not authorized")
         return
     
-    pending_posts = get_pending_submissions()
+    pending_posts = (await AsyncDBWrapper.run_sync(get_pending_submissions))
     
     if not pending_posts:
         pending_text = "✅ *No Pending Posts*\n\nAll submissions have been reviewed\\!"
@@ -7131,7 +7147,7 @@ async def admin_content_management(update: Update, context: ContextTypes.DEFAULT
         return
     
     # Get content stats
-    pending_posts = len(get_pending_submissions())
+    pending_posts = len((await AsyncDBWrapper.run_sync(get_pending_submissions)))
     
     content_text = f"""
 📝 *Content Management*
@@ -7175,7 +7191,7 @@ async def admin_moderation_panel(update: Update, context: ContextTypes.DEFAULT_T
         return
     
     from moderation import get_reports
-    reports = get_reports()
+    reports = (await AsyncDBWrapper.run_sync(get_reports))
     report_count = len(reports)
     
     moderation_text = f"""
@@ -7219,7 +7235,7 @@ async def admin_messages_panel(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.answer("❗ Not authorized")
         return
     
-    pending_messages = len(get_pending_messages())
+    pending_messages = len((await AsyncDBWrapper.run_sync(get_pending_messages)))
     
     messages_text = f"""
 💬 *Message Management*
@@ -7330,7 +7346,7 @@ async def admin_recent_posts(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     # Get recent approved posts
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT p.post_id, p.content, p.category, p.timestamp, p.user_id,
@@ -7438,7 +7454,7 @@ async def admin_content_stats(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         # Get comprehensive content statistics from database
         db_conn = get_db_connection()
-        with db_conn.get_connection() as conn:
+        with db_conn.get_connection(readonly=True) as conn:
             cursor = conn.cursor()
             
             # Total posts statistics
@@ -7642,7 +7658,7 @@ async def admin_view_reports(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     
     from moderation import get_reports, get_content_details
-    reports = get_reports()
+    reports = (await AsyncDBWrapper.run_sync(get_reports))
     
     if not reports:
         await query.edit_message_text(
@@ -7681,7 +7697,7 @@ async def admin_view_reports(update: Update, context: ContextTypes.DEFAULT_TYPE)
         first_report = target_reports[0]
         
         # Get content details
-        content_details = get_content_details(target_type, target_id)
+        content_details = (await AsyncDBWrapper.run_sync(get_content_details, target_type, target_id))
         
         if content_details:
             if target_type == 'comment':
@@ -7780,11 +7796,11 @@ async def admin_mod_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         from moderation import get_reports
-        reports = get_reports()
+        reports = (await AsyncDBWrapper.run_sync(get_reports))
         
         # Get detailed moderation statistics from database
         db_conn = get_db_connection()
-        with db_conn.get_connection() as conn:
+        with db_conn.get_connection(readonly=True) as conn:
             cursor = conn.cursor()
             
             # Total reports
@@ -7955,7 +7971,7 @@ async def admin_pending_messages(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer("❗ Not authorized")
         return
     
-    pending_messages = get_pending_messages()
+    pending_messages = (await AsyncDBWrapper.run_sync(get_pending_messages))
     
     if not pending_messages:
         await query.edit_message_text(
@@ -8102,7 +8118,7 @@ async def admin_db_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         db_conn = get_db_connection()
-        with db_conn.get_connection() as conn:
+        with db_conn.get_connection(readonly=True) as conn:
             cursor = conn.cursor()
             
             # Get basic table counts
@@ -8319,8 +8335,8 @@ async def admin_backup_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from backup_system import get_backup_status, backup_manager
         
         # Get backup system status and statistics
-        status = get_backup_status()
-        recent_backups = backup_manager.list_backups(limit=5)
+        status = (await AsyncDBWrapper.run_sync(get_backup_status))
+        recent_backups = (await AsyncDBWrapper.run_sync(backup_manager.list_backups, limit=5))
         
         # Format backup information message
         message_text = "💾 *Backup Information*\n\n"
@@ -8425,7 +8441,7 @@ async def admin_backup_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Check if database is accessible
             try:
                 db_conn = get_db_connection()
-                with db_conn.get_connection() as conn:
+                with db_conn.get_connection(readonly=True) as conn:
                     cursor = conn.cursor()
                     cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'")
                     table_count = cursor.fetchone()[0]
@@ -8652,7 +8668,7 @@ async def search_user_recent_callback(update: Update, context: ContextTypes.DEFA
         from db import get_recent_users
         
         # Get recent users using existing function
-        recent_users = get_recent_users(15)
+        recent_users = (await AsyncDBWrapper.run_sync(get_recent_users, 15))
         
         if not recent_users:
             await query.edit_message_text(
@@ -8732,7 +8748,7 @@ async def search_user_active_callback(update: Update, context: ContextTypes.DEFA
         from db import get_active_users
         
         # Get active users using existing function
-        active_users = get_active_users(15)
+        active_users = (await AsyncDBWrapper.run_sync(get_active_users, 15))
         
         if not active_users:
             await query.edit_message_text(
@@ -8825,16 +8841,16 @@ async def handle_admin_user_search(update: Update, context: ContextTypes.DEFAULT
         if search_mode == 'by_id':
             try:
                 user_id_search = int(search_term)
-                results = search_manager.search_users(user_id=user_id_search)
+                results = (await AsyncDBWrapper.run_sync(search_manager.search_users, user_id=user_id_search))
             except ValueError:
                 await update.message.reply_text("❗ Invalid user ID. Please enter a number.")
                 return
         elif search_mode == 'by_username':
-            results = search_manager.search_users(username=search_term)
+            results = (await AsyncDBWrapper.run_sync(search_manager.search_users, username=search_term))
         elif search_mode == 'by_letter':
-            results = search_manager.search_users(name_starts_with=search_term)
+            results = (await AsyncDBWrapper.run_sync(search_manager.search_users, name_starts_with=search_term))
         elif search_mode == 'general':
-            results = search_manager.search_users(query=search_term)
+            results = (await AsyncDBWrapper.run_sync(search_manager.search_users, query=search_term))
         
         # Clear search state
         context.user_data.pop('state', None)
@@ -8949,7 +8965,7 @@ async def admin_create_backup_callback(update: Update, context: ContextTypes.DEF
         )
         
         # Create the backup
-        success, result = backup_manager.create_backup(backup_type="manual")
+        success, result = (await AsyncDBWrapper.run_sync(backup_manager.create_backup, backup_type="manual"))
         
         if success:
             backup_info = result
@@ -9032,7 +9048,7 @@ async def admin_list_backups_callback(update: Update, context: ContextTypes.DEFA
         from datetime import datetime
         
         # Get all backups
-        backups = backup_manager.list_backups(limit=20)
+        backups = (await AsyncDBWrapper.run_sync(backup_manager.list_backups, limit=20))
         
         if not backups:
             await query.edit_message_text(
@@ -9143,14 +9159,14 @@ async def admin_cleanup_backups_callback(update: Update, context: ContextTypes.D
         )
         
         # Get current backup count before cleanup
-        backups_before = backup_manager.list_backups()
+        backups_before = (await AsyncDBWrapper.run_sync(backup_manager.list_backups))
         count_before = len(backups_before)
         
         # Clean old backups (keep last 10)
-        cleaned_count, total_size_freed = backup_manager.cleanup_old_backups(keep_count=10)
+        cleaned_count, total_size_freed = (await AsyncDBWrapper.run_sync(backup_manager.cleanup_old_backups, keep_count=10))
         
         # Get backup count after cleanup
-        backups_after = backup_manager.list_backups()
+        backups_after = (await AsyncDBWrapper.run_sync(backup_manager.list_backups))
         count_after = len(backups_after)
         
         if cleaned_count > 0:
@@ -9212,7 +9228,7 @@ async def admin_table_info_callback(update: Update, context: ContextTypes.DEFAUL
 
     try:
         db_conn = get_db_connection()
-        with db_conn.get_connection() as conn:
+        with db_conn.get_connection(readonly=True) as conn:
             cursor = conn.cursor()
 
             # Get table names (PostgreSQL style)
@@ -9438,7 +9454,7 @@ async def handle_admin_delete_post_callback(update: Update, context: ContextType
         logger.info(f"Admin {user_id} attempting to delete post {post_id}")
 
         # Get post details first
-        post_details = get_post_details_for_deletion(post_id)
+        post_details = (await AsyncDBWrapper.run_sync(get_post_details_for_deletion, post_id))
         logger.info(f"Post details for {post_id}: {post_details}")
 
         if not post_details:
@@ -9495,7 +9511,7 @@ async def handle_admin_delete_comment_callback(update: Update, context: ContextT
     comment_id = int(query.data.replace("admin_delete_comment_", ""))
     
     # Get comment details first
-    comment_details = get_comment_details_for_deletion(comment_id)
+    comment_details = (await AsyncDBWrapper.run_sync(get_comment_details_for_deletion, comment_id))
     
     if not comment_details:
         await query.answer("❗ Comment not found!")
@@ -9554,7 +9570,7 @@ async def handle_admin_clear_reports_callback(update: Update, context: ContextTy
     
     try:
         # Clear reports for the content
-        success, cleared_count = clear_reports_for_content(target_type, target_id)
+        success, cleared_count = (await AsyncDBWrapper.run_sync(clear_reports_for_content, target_type, target_id))
         
         if success:
             await query.answer(f"✅ Cleared {cleared_count} reports!")
@@ -9607,7 +9623,7 @@ async def handle_admin_approve_callback(update: Update, context: ContextTypes.DE
     
     try:
         # Clear reports for the content (approving it)
-        success, cleared_count = clear_reports_for_content(target_type, target_id)
+        success, cleared_count = (await AsyncDBWrapper.run_sync(clear_reports_for_content, target_type, target_id))
         
         if success:
             await query.answer(f"✅ {target_type.title()} approved!")
@@ -9657,7 +9673,7 @@ async def handle_confirm_delete_post_callback(update: Update, context: ContextTy
     
     try:
         # Get post details for logging before deletion
-        post_details = get_post_details_for_deletion(post_id)
+        post_details = (await AsyncDBWrapper.run_sync(get_post_details_for_deletion, post_id))
         
         if not post_details:
             await query.edit_message_text(
@@ -9678,7 +9694,7 @@ async def handle_confirm_delete_post_callback(update: Update, context: ContextTy
                 logger.warning(f"Failed to delete channel message for post {post_id}: {e}")
         
         # Perform the complete deletion
-        success, deletion_stats = delete_post_completely(post_id, user_id)
+        success, deletion_stats = (await AsyncDBWrapper.run_sync(delete_post_completely, post_id, user_id))
         
         if success:
             # Create success message with deletion statistics (use HTML to avoid MarkdownV2 escaping issues)
@@ -9828,7 +9844,7 @@ async def handle_confirm_delete_comment_callback(update: Update, context: Contex
     
     try:
         # Get comment details for logging before deletion
-        comment_details = get_comment_details_for_deletion(comment_id)
+        comment_details = (await AsyncDBWrapper.run_sync(get_comment_details_for_deletion, comment_id))
         
         if not comment_details:
             await query.edit_message_text(
@@ -9843,7 +9859,7 @@ async def handle_confirm_delete_comment_callback(update: Update, context: Contex
         post_id = comment_details.get('post_id')
         
         # Perform the complete deletion
-        success, deletion_stats = delete_comment_completely(comment_id, user_id)
+        success, deletion_stats = (await AsyncDBWrapper.run_sync(delete_comment_completely, comment_id, user_id))
         
         if success:
             # Update the channel message comment count if post exists
@@ -10000,7 +10016,7 @@ async def admin_user_detailed_info(update: Update, context: ContextTypes.DEFAULT
         from text_utils import escape_markdown_text
         
         # Get detailed user info from SearchManager
-        user_details = search_manager.get_user_detailed_info(user_id_to_view)
+        user_details = (await AsyncDBWrapper.run_sync(search_manager.get_user_detailed_info, user_id_to_view))
         
         if not user_details:
             await query.edit_message_text(
@@ -10144,7 +10160,7 @@ async def admin_user_posts_callback(update: Update, context: ContextTypes.DEFAUL
         from admin_tools import search_manager
         
         # Get paginated posts for the user
-        posts_data = search_manager.get_user_posts_paginated(user_id_to_view, page)
+        posts_data = (await AsyncDBWrapper.run_sync(search_manager.get_user_posts_paginated, user_id_to_view, page))
         
         if not posts_data['posts']:
             no_posts_text = f"📝 *No Posts Found*\n\n"
@@ -10230,7 +10246,7 @@ async def admin_user_comments_callback(update: Update, context: ContextTypes.DEF
         from admin_tools import search_manager
         
         # Get paginated comments for the user
-        comments_data = search_manager.get_user_comments_paginated(user_id_to_view, page)
+        comments_data = (await AsyncDBWrapper.run_sync(search_manager.get_user_comments_paginated, user_id_to_view, page))
         
         if not comments_data['comments']:
             no_comments_text = f"💬 *No Comments Found*\n\n"
@@ -10312,7 +10328,7 @@ async def admin_user_activity_analytics_callback(update: Update, context: Contex
         from admin_tools import search_manager
         
         # Get user activity analytics
-        analytics = search_manager.get_user_activity_analytics(user_id_to_view)
+        analytics = (await AsyncDBWrapper.run_sync(search_manager.get_user_activity_analytics, user_id_to_view))
         
         if not analytics:
             no_analytics_text = f"🎯 *No Activity Analytics*\n\n"
@@ -10405,7 +10421,7 @@ async def admin_user_post_analytics_callback(update: Update, context: ContextTyp
         from admin_tools import search_manager
         
         # Get user activity analytics (contains post analytics)
-        analytics = search_manager.get_user_activity_analytics(user_id_to_view)
+        analytics = (await AsyncDBWrapper.run_sync(search_manager.get_user_activity_analytics, user_id_to_view))
         
         if not analytics or analytics['total_posts'] == 0:
             no_posts_text = f"📈 *No Post Analytics*\n\n"
@@ -10484,7 +10500,7 @@ async def admin_user_comment_analytics_callback(update: Update, context: Context
         from admin_tools import search_manager
         
         # Get user activity analytics (contains comment analytics)
-        analytics = search_manager.get_user_activity_analytics(user_id_to_view)
+        analytics = (await AsyncDBWrapper.run_sync(search_manager.get_user_activity_analytics, user_id_to_view))
         
         if not analytics or analytics['total_comments'] == 0:
             no_comments_text = f"📊 *No Comment Analytics*\n\n"

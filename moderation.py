@@ -2,6 +2,7 @@ import csv
 from datetime import datetime
 from config import ADMIN_IDS, MINI_ADMIN_IDS
 from db_connection import get_db_connection
+from db_connection import AsyncDBWrapper
 
 def report_abuse(user_id, target_type, target_id, reason):
     """Report abuse for a post or comment"""
@@ -46,7 +47,7 @@ def report_abuse(user_id, target_type, target_id, reason):
 def get_reports():
     """Get all abuse reports"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM reports ORDER BY timestamp DESC")
         return cursor.fetchall()
@@ -54,7 +55,7 @@ def get_reports():
 def get_flagged_content():
     """Get all flagged posts and comments"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         
         # Get flagged posts
@@ -72,7 +73,7 @@ def export_confessions_csv():
     filename = f"confessions_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM posts")
         posts = cursor.fetchall()
@@ -89,7 +90,7 @@ def export_comments_csv():
     filename = f"comments_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM comments")
         comments = cursor.fetchall()
@@ -104,7 +105,7 @@ def export_comments_csv():
 def get_content_details(target_type, target_id):
     """Get details about reported content"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         
@@ -129,7 +130,7 @@ async def notify_admins_about_reports(context, target_type, target_id, report_co
         return False
     
     # Get content details
-    content_details = get_content_details(target_type, target_id)
+    content_details = (await AsyncDBWrapper.run_sync(get_content_details, target_type, target_id))
     if not content_details:
         return False
     
@@ -193,7 +194,7 @@ def export_users_csv():
     filename = f"users_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM users")
         users = cursor.fetchall()

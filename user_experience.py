@@ -105,7 +105,7 @@ class DraftManager:
         """Get user's current draft"""
         db_conn = get_db_connection()
         placeholder = db_conn.get_placeholder()
-        with db_conn.get_connection() as conn:
+        with db_conn.get_connection(readonly=True) as conn:
             cursor = conn.cursor()
             cursor.execute(f"""
                 SELECT draft_id, user_id, content, category, created_at, updated_at
@@ -135,7 +135,7 @@ class DraftManager:
         """Get all drafts for a user (in case we support multiple drafts later)"""
         db_conn = get_db_connection()
         placeholder = db_conn.get_placeholder()
-        with db_conn.get_connection() as conn:
+        with db_conn.get_connection(readonly=True) as conn:
             cursor = conn.cursor()
             cursor.execute(f"""
                 SELECT draft_id, user_id, content, category, created_at, updated_at

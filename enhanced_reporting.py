@@ -9,6 +9,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from config import ADMIN_IDS
 from utils import escape_markdown_text, truncate_text
 from db_connection import get_db_connection, execute_query, adapt_query
+from db_connection import AsyncDBWrapper
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,7 @@ async def show_report_reasons(update, context, content_type, content_id):
     query = update.callback_query
     
     # Get content preview for context
-    content_preview = get_content_preview(content_type, content_id)
+    content_preview = (await AsyncDBWrapper.run_sync(get_content_preview, content_type, content_id))
     
     if not content_preview:
         await query.answer("❗ Content not found or no longer available!")
@@ -85,7 +86,7 @@ def get_content_preview(content_type, content_id):
     """Get content preview for report context"""
     try:
         db_conn = get_db_connection()
-        with db_conn.get_connection() as conn:
+        with db_conn.get_connection(readonly=True) as conn:
             cursor = conn.cursor()
             placeholder = db_conn.get_placeholder()
             
@@ -140,7 +141,7 @@ def submit_report(user_id, content_type, content_id, reason_id, custom_reason=No
 async def notify_admins_immediate(context, content_type, content_id, reason_id, user_id, report_count):
     """Send immediate notification to admins about the report"""
     # Get content details
-    content_info = get_content_details(content_type, content_id)
+    content_info = (await AsyncDBWrapper.run_sync(get_content_details, content_type, content_id))
     if not content_info:
         return False
     
@@ -233,7 +234,7 @@ def get_content_details(content_type, content_id):
     """Get details about reported content"""
     try:
         db_conn = get_db_connection()
-        with db_conn.get_connection() as conn:
+        with db_conn.get_connection(readonly=True) as conn:
             cursor = conn.cursor()
             placeholder = db_conn.get_placeholder()
             
@@ -270,7 +271,7 @@ async def handle_report_reason_callback(update, context):
     reason_emoji, reason_description = get_report_reason_info(reason_id)
     
     # Get content preview for context
-    content_preview = get_content_preview(content_type, content_id)
+    content_preview = (await AsyncDBWrapper.run_sync(get_content_preview, content_type, content_id))
     if not content_preview:
         await query.answer("❗ Content not found or no longer available!")
         return
@@ -326,7 +327,7 @@ async def handle_submit_report(update, context):
     user_id = update.effective_user.id
     
     # Submit the report
-    success, result = submit_report(user_id, content_type, content_id, reason_id)
+    success, result = (await AsyncDBWrapper.run_sync(submit_report, user_id, content_type, content_id, reason_id))
     
     if not success:
         if result == "already_reported":
@@ -415,7 +416,7 @@ async def handle_admin_dismiss_report(update, context):
         return
     
     # Dismiss all reports for this content
-    dismissed_count = dismiss_reports_for_content(content_type, content_id)
+    dismissed_count = (await AsyncDBWrapper.run_sync(dismiss_reports_for_content, content_type, content_id))
     
     await query.edit_message_text(
         f"✅ **Reports Dismissed**\\n\\n"

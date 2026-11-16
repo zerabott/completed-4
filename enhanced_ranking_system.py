@@ -276,7 +276,7 @@ class EnhancedAchievementSystem:
         db_conn = get_db_connection()
         
         try:
-            with db_conn.get_connection() as conn:
+            with db_conn.get_connection(readonly=True) as conn:
                 cursor = conn.cursor()
                 placeholder = db_conn.get_placeholder()
                 

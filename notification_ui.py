@@ -14,6 +14,7 @@ from notifications import (
     get_post_subscribers
 )
 from utils import escape_markdown_text
+from db_connection import AsyncDBWrapper
 
 logger = logging.getLogger(__name__)
 
@@ -79,13 +80,13 @@ async def handle_notification_preferences_callback(update: Update, context: Cont
 async def toggle_comment_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Toggle comment notifications setting"""
     user_id = update.effective_user.id
-    prefs = get_user_preferences(user_id)
+    prefs = (await AsyncDBWrapper.run_sync(get_user_preferences, user_id))
     
     # Toggle the setting
     prefs['comment_notifications'] = not prefs['comment_notifications']
     
     # Update preferences
-    success = update_user_preferences(user_id, prefs)
+    success = (await AsyncDBWrapper.run_sync(update_user_preferences, user_id, prefs))
     
     if success:
         status = "enabled" if prefs['comment_notifications'] else "disabled"
@@ -100,13 +101,13 @@ async def toggle_comment_notifications(update: Update, context: ContextTypes.DEF
 async def toggle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Toggle daily digest setting"""
     user_id = update.effective_user.id
-    prefs = get_user_preferences(user_id)
+    prefs = (await AsyncDBWrapper.run_sync(get_user_preferences, user_id))
     
     # Toggle the setting
     prefs['daily_digest'] = not prefs['daily_digest']
     
     # Update preferences
-    success = update_user_preferences(user_id, prefs)
+    success = (await AsyncDBWrapper.run_sync(update_user_preferences, user_id, prefs))
     
     if success:
         status = "enabled" if prefs['daily_digest'] else "disabled"
@@ -121,13 +122,13 @@ async def toggle_daily_digest(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def toggle_trending_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Toggle trending alerts setting"""
     user_id = update.effective_user.id
-    prefs = get_user_preferences(user_id)
+    prefs = (await AsyncDBWrapper.run_sync(get_user_preferences, user_id))
     
     # Toggle the setting
     prefs['trending_alerts'] = not prefs['trending_alerts']
     
     # Update preferences
-    success = update_user_preferences(user_id, prefs)
+    success = (await AsyncDBWrapper.run_sync(update_user_preferences, user_id, prefs))
     
     if success:
         status = "enabled" if prefs['trending_alerts'] else "disabled"
@@ -142,7 +143,7 @@ async def toggle_trending_alerts(update: Update, context: ContextTypes.DEFAULT_T
 async def show_category_management(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show favorite category management interface"""
     user_id = update.effective_user.id
-    prefs = get_user_preferences(user_id)
+    prefs = (await AsyncDBWrapper.run_sync(get_user_preferences, user_id))
     favorite_categories = prefs['favorite_categories']
     
     category_text = """
@@ -192,7 +193,7 @@ async def handle_favorite_category_toggle(update: Update, context: ContextTypes.
     category = CATEGORIES[category_index]
     
     # Get current preferences
-    prefs = get_user_preferences(user_id)
+    prefs = (await AsyncDBWrapper.run_sync(get_user_preferences, user_id))
     favorite_categories = prefs['favorite_categories']
     
     # Toggle category
@@ -205,7 +206,7 @@ async def handle_favorite_category_toggle(update: Update, context: ContextTypes.
     
     # Update preferences
     prefs['favorite_categories'] = favorite_categories
-    success = update_user_preferences(user_id, prefs)
+    success = (await AsyncDBWrapper.run_sync(update_user_preferences, user_id, prefs))
     
     if success:
         # Refresh the category management page
@@ -216,7 +217,7 @@ async def handle_favorite_category_toggle(update: Update, context: ContextTypes.
 async def show_digest_time_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show digest time selection options"""
     user_id = update.effective_user.id
-    prefs = get_user_preferences(user_id)
+    prefs = (await AsyncDBWrapper.run_sync(get_user_preferences, user_id))
     current_time = prefs['digest_time']
     
     time_text = f"""
@@ -265,11 +266,11 @@ async def handle_digest_time_selection(update: Update, context: ContextTypes.DEF
     new_time = query.data.replace("digest_time_", "")
     
     # Get current preferences
-    prefs = get_user_preferences(user_id)
+    prefs = (await AsyncDBWrapper.run_sync(get_user_preferences, user_id))
     prefs['digest_time'] = new_time
     
     # Update preferences
-    success = update_user_preferences(user_id, prefs)
+    success = (await AsyncDBWrapper.run_sync(update_user_preferences, user_id, prefs))
     
     if success:
         await query.answer(f"⏰ Digest time set to {new_time}!")
@@ -365,7 +366,7 @@ Your recent notifications ({len(history)} shown):
 async def show_notification_menu_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show notification menu when user selects 🔔 Smart Notifications from main menu"""
     user_id = update.effective_user.id if update.effective_user else update.message.from_user.id
-    prefs = get_user_preferences(user_id)
+    prefs = (await AsyncDBWrapper.run_sync(get_user_preferences, user_id))
     
     # Count active notifications
     active_count = sum([
@@ -451,10 +452,10 @@ async def send_test_notification(update: Update, context: ContextTypes.DEFAULT_T
 async def handle_clear_all_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear all favorite categories"""
     user_id = update.effective_user.id
-    prefs = get_user_preferences(user_id)
+    prefs = (await AsyncDBWrapper.run_sync(get_user_preferences, user_id))
     prefs['favorite_categories'] = []
     
-    success = update_user_preferences(user_id, prefs)
+    success = (await AsyncDBWrapper.run_sync(update_user_preferences, user_id, prefs))
     if success:
         await update.callback_query.answer("🗑️ All categories cleared!")
         await show_category_management(update, context)

@@ -1,4 +1,5 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import time
 from functools import lru_cache
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -16,6 +17,10 @@ logger = logging.getLogger(__name__)
 _profile_cache = {}
 _rank_cache = {}
 _cache_expiry = 300  # 5 minutes cache expiry
+
+# Comment pages need three independent lookups; running them side by side
+# turns three database round trips into one.
+_PREFETCH_POOL = ThreadPoolExecutor(max_workers=6, thread_name_prefix="comment-prefetch")
 
 def get_cached_user_profile(user_id):
     """Get user profile with caching"""
@@ -76,6 +81,19 @@ def prefetch_comment_page_data(user_id, comments_flat):
     db_conn = get_db_connection()
     placeholder = db_conn.get_placeholder()
 
+    reactions_job = _PREFETCH_POOL.submit(_fetch_viewer_reactions, user_id, comment_ids)
+    jobs = []
+    if commenter_ids:
+        jobs.append(_PREFETCH_POOL.submit(_prefetch_user_profiles, commenter_ids))
+        jobs.append(_PREFETCH_POOL.submit(_prefetch_user_ranks_safe, commenter_ids))
+    for job in jobs:
+        job.result()
+    return reactions_job.result()
+
+
+def _fetch_viewer_reactions(user_id, comment_ids):
+    db_conn = get_db_connection()
+    placeholder = db_conn.get_placeholder()
     reactions = {}
     try:
         with db_conn.get_connection(readonly=True) as conn:
@@ -90,22 +108,24 @@ def prefetch_comment_page_data(user_id, comments_flat):
             reactions = {row[0]: row[1] for row in cursor.fetchall()}
     except Exception as e:
         logger.error(f"Error prefetching reactions for user {user_id}: {e}")
-
-    if commenter_ids:
-        try:
-            profiles = get_user_profiles_bulk(commenter_ids)
-            expiry = time.time() + _cache_expiry
-            for commenter_id, profile in profiles.items():
-                _profile_cache[commenter_id] = (profile, expiry)
-        except Exception as e:
-            logger.error(f"Error prefetching commenter profiles: {e}")
-
-        try:
-            _prefetch_user_ranks(commenter_ids)
-        except Exception as e:
-            logger.error(f"Error prefetching commenter ranks: {e}")
-
     return reactions
+
+
+def _prefetch_user_profiles(commenter_ids):
+    try:
+        profiles = get_user_profiles_bulk(commenter_ids)
+        expiry = time.time() + _cache_expiry
+        for commenter_id, profile in profiles.items():
+            _profile_cache[commenter_id] = (profile, expiry)
+    except Exception as e:
+        logger.error(f"Error prefetching commenter profiles: {e}")
+
+
+def _prefetch_user_ranks_safe(commenter_ids):
+    try:
+        _prefetch_user_ranks(commenter_ids)
+    except Exception as e:
+        logger.error(f"Error prefetching commenter ranks: {e}")
 
 
 def _prefetch_user_ranks(user_ids):
@@ -257,7 +277,7 @@ async def save_comment_with_points(post_id, content, user_id, context, parent_co
 def get_post_with_channel_info(post_id):
     """Get post information including channel message ID"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(
@@ -382,7 +402,7 @@ def get_comments_paginated(post_id, page=1):
 def get_comment_by_id(comment_id):
     """Get a specific comment by ID"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(
@@ -536,7 +556,7 @@ def flag_comment(comment_id):
 def get_user_reaction(user_id, comment_id):
     """Get user's reaction to a specific comment"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(
@@ -549,7 +569,7 @@ def get_user_reaction(user_id, comment_id):
 def get_comment_sequential_number(comment_id):
     """Get the sequential number of a comment within its post"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         
@@ -585,7 +605,7 @@ def get_comment_sequential_number(comment_id):
 def get_parent_comment_for_reply(comment_id):
     """Get the parent comment details for a reply comment"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         
@@ -644,7 +664,7 @@ def replace_comment_with_notice(comment_id: int, notice: str = "This comment was
 def get_comment_reply_level(comment_id):
     """Get the reply level of a comment (0 = main comment, 1 = first reply, 2 = second reply)"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         
@@ -849,7 +869,7 @@ def find_comment_page(comment_id):
     try:
         # Get comment info
         db_conn = get_db_connection()
-        with db_conn.get_connection() as conn:
+        with db_conn.get_connection(readonly=True) as conn:
             cursor = conn.cursor()
             placeholder = db_conn.get_placeholder()
             cursor.execute(
@@ -896,7 +916,7 @@ async def update_channel_message_comment_count(context, post_id):
     try:
         # Get post info including channel message ID and post_number
         db_conn = get_db_connection()
-        with db_conn.get_connection() as conn:
+        with db_conn.get_connection(readonly=True) as conn:
             cursor = conn.cursor()
             placeholder = db_conn.get_placeholder()
             cursor.execute(
@@ -916,7 +936,7 @@ async def update_channel_message_comment_count(context, post_id):
             return False, "Post not approved"
 
         # Get current comment count
-        comment_count = get_comment_count(post_id)
+        comment_count = (await AsyncDBWrapper.run_sync(get_comment_count, post_id))
         logger.info(f"Retrieved comment count for post {post_id}: {comment_count}")
 
         # Create updated inline buttons with new comment count
@@ -924,7 +944,7 @@ async def update_channel_message_comment_count(context, post_id):
         bot_username_clean = BOT_USERNAME.lstrip('@')
 
         from db import is_post_sensitive
-        is_sensitive = is_post_sensitive(post_id)
+        is_sensitive = (await AsyncDBWrapper.run_sync(is_post_sensitive, post_id))
 
         # Build updated inline keyboard based on sensitivity
         if is_sensitive:
@@ -997,9 +1017,9 @@ async def update_channel_message_comment_count(context, post_id):
         try:
             from html import escape as html_escape
 
-            author_id = get_post_author_id(post_id)
+            author_id = (await AsyncDBWrapper.run_sync(get_post_author_id, post_id))
             if author_id:
-                author_profile = get_user_profile(author_id)
+                author_profile = (await AsyncDBWrapper.run_sync(get_user_profile, author_id))
                 if author_profile and author_profile.get('is_active'):
                     name_raw = (
                         (author_profile.get('emoji') or '')
@@ -1020,9 +1040,9 @@ async def update_channel_message_comment_count(context, post_id):
 
         # Check if this is a media post
         logger.info(f"Updating non-sensitive post {post_id} with comment count {comment_count}")
-        if is_media_post(post_id):
+        if (await AsyncDBWrapper.run_sync(is_media_post, post_id)):
             # Get media information
-            media_info = get_media_info(post_id)
+            media_info = (await AsyncDBWrapper.run_sync(get_media_info, post_id))
             logger.info(f"Media post detected for post {post_id}, media_info: {media_info}")
 
             if media_info:

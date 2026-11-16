@@ -4,7 +4,7 @@ from db_connection import get_db_connection
 def get_user_stats(user_id):
     """Get comprehensive user statistics"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         
@@ -67,7 +67,7 @@ def get_user_stats(user_id):
 def get_channel_stats():
     """Get overall channel statistics"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         
         # Total approved posts

@@ -14,6 +14,7 @@ import json
 from enhanced_ranking_system import EnhancedPointSystem, EnhancedAchievementSystem, UserRank
 from config import ADMIN_IDS
 from db_connection import get_db_connection
+from db_connection import AsyncDBWrapper
 # Note: escape_markdown_text imported locally to avoid circular imports
 
 logger = logging.getLogger(__name__)
@@ -184,7 +185,7 @@ class RankingManager:
     def get_user_rank(self, user_id: int) -> Optional[UserRank]:
         """Get user's current ranking information"""
         try:
-            with self.db_conn.get_connection() as conn:
+            with self.db_conn.get_connection(readonly=True) as conn:
                 cursor = conn.cursor()
                 placeholder = self.db_conn.get_placeholder()
                 
@@ -239,7 +240,7 @@ class RankingManager:
     def get_user_achievements(self, user_id: int, limit: int = 20) -> list:
         """Get user's achievements"""
         try:
-            with self.db_conn.get_connection() as conn:
+            with self.db_conn.get_connection(readonly=True) as conn:
                 cursor = conn.cursor()
                 placeholder = self.db_conn.get_placeholder()
                 
@@ -318,7 +319,7 @@ class RankingManager:
             
             for achievement in all_achievements:
                 # Check if user qualifies for this achievement
-                if self.achievement_system.check_achievement_qualification(user_id, achievement):
+                if (await AsyncDBWrapper.run_sync(self.achievement_system.check_achievement_qualification, user_id, achievement)):
                     # Award the achievement
                     if await self._award_achievement(user_id, achievement):
                         new_achievements.append(achievement)
@@ -410,14 +411,14 @@ class RankingIntegration:
         """Handle points when confession is submitted"""
         try:
             # Award points using ranking manager
-            success, points = ranking_manager.award_points(
+            success, points = (await AsyncDBWrapper.run_sync(ranking_manager.award_points,
                 user_id=user_id,
                 activity_type='confession_submitted',
                 reference_id=post_id,
                 reference_type='confession',
                 description="Confession submitted",
                 content_length=len(category)
-            )
+            ))
             
             if success:
                 logger.info(f"Awarded {points} points to user {user_id} for confession submission")
@@ -433,13 +434,13 @@ class RankingIntegration:
         """Handle points when confession is approved"""
         try:
             # Award points to user
-            success, points = ranking_manager.award_points(
+            success, points = (await AsyncDBWrapper.run_sync(ranking_manager.award_points,
                 user_id=user_id,
                 activity_type='confession_approved',
                 reference_id=post_id,
                 reference_type='confession',
                 description="Confession approved by admin"
-            )
+            ))
             
             if success:
                 logger.info(f"Awarded {points} points to user {user_id} for approved confession")
@@ -460,13 +461,13 @@ class RankingIntegration:
     async def handle_confession_rejected(user_id: int, post_id: int, admin_id: int):
         """Handle points when confession is rejected"""
         try:
-            success, points = ranking_manager.award_points(
+            success, points = (await AsyncDBWrapper.run_sync(ranking_manager.award_points,
                 user_id=user_id,
                 activity_type='content_rejected',
                 reference_id=post_id,
                 reference_type='confession',
                 description="Confession rejected by admin"
-            )
+            ))
             
             if success:
                 logger.info(f"Deducted {abs(points)} points from user {user_id} for rejected confession")
@@ -485,14 +486,14 @@ class RankingIntegration:
             if len(content) > 100:
                 activity_type = 'quality_comment'
             
-            success, points = ranking_manager.award_points(
+            success, points = (await AsyncDBWrapper.run_sync(ranking_manager.award_points,
                 user_id=user_id,
                 activity_type=activity_type,
                 reference_id=comment_id,
                 reference_type='comment',
                 comment_length=len(content),
                 description=f"Posted comment on confession {post_id}"
-            )
+            ))
             
             if success:
                 logger.info(f"Awarded {points} points to user {user_id} for comment")
@@ -510,13 +511,13 @@ class RankingIntegration:
     async def handle_reaction_given(user_id: int, target_id: int, target_type: str, reaction_type: str):
         """Handle points when user gives a reaction"""
         try:
-            success, points = ranking_manager.award_points(
+            success, points = (await AsyncDBWrapper.run_sync(ranking_manager.award_points,
                 user_id=user_id,
                 activity_type='reaction_given',
                 reference_id=target_id,
                 reference_type=target_type,
                 description=f"Gave {reaction_type} reaction to {target_type}"
-            )
+            ))
             
             if success:
                 logger.info(f"Awarded {points} points to user {user_id} for reaction")
@@ -530,13 +531,13 @@ class RankingIntegration:
         try:
             activity_type = 'confession_liked' if target_type == 'confession' else 'comment_liked'
             
-            success, points = ranking_manager.award_points(
+            success, points = (await AsyncDBWrapper.run_sync(ranking_manager.award_points,
                 user_id=user_id,
                 activity_type=activity_type,
                 reference_id=target_id,
                 reference_type=target_type,
                 description=f"Received {reaction_type} on {target_type}"
-            )
+            ))
             
             if success:
                 logger.info(f"Awarded {points} points to user {user_id} for receiving reaction")
@@ -552,13 +553,13 @@ class RankingIntegration:
     async def handle_spam_detected(user_id: int, content_id: int, content_type: str):
         """Handle point deduction for spam"""
         try:
-            success, points = ranking_manager.award_points(
+            success, points = (await AsyncDBWrapper.run_sync(ranking_manager.award_points,
                 user_id=user_id,
                 activity_type='spam_detected',
                 reference_id=content_id,
                 reference_type=content_type,
                 description=f"Spam detected in {content_type}"
-            )
+            ))
             
             if success:
                 logger.info(f"Deducted {abs(points)} points from user {user_id} for spam")
@@ -570,13 +571,13 @@ class RankingIntegration:
     async def handle_inappropriate_content(user_id: int, content_id: int, content_type: str):
         """Handle point deduction for inappropriate content"""
         try:
-            success, points = ranking_manager.award_points(
+            success, points = (await AsyncDBWrapper.run_sync(ranking_manager.award_points,
                 user_id=user_id,
                 activity_type='inappropriate_content',
                 reference_id=content_id,
                 reference_type=content_type,
                 description=f"Inappropriate content in {content_type}"
-            )
+            ))
             
             if success:
                 logger.info(f"Deducted {abs(points)} points from user {user_id} for inappropriate content")
@@ -619,7 +620,7 @@ class RankingIntegration:
         """Check for viral post achievements based on likes"""
         try:
             db_conn = get_db_connection()
-            with db_conn.get_connection() as conn:
+            with db_conn.get_connection(readonly=True) as conn:
                 cursor = conn.cursor()
                 placeholder = db_conn.get_placeholder()
                 
@@ -633,14 +634,14 @@ class RankingIntegration:
                 
                 # Check for viral achievements
                 if like_count >= 100:
-                    success, points = ranking_manager.award_points(
+                    success, points = (await AsyncDBWrapper.run_sync(ranking_manager.award_points,
                         user_id=user_id,
                         activity_type='confession_100_likes',
                         reference_id=post_id,
                         reference_type='confession',
                         like_count=like_count,
                         description=f"Confession reached {like_count} likes"
-                    )
+                    ))
                     
                     if success:
                         # Notify about viral achievement
@@ -659,7 +660,7 @@ class RankingIntegration:
     async def check_and_notify_rank_up(user_id: int, context: ContextTypes.DEFAULT_TYPE):
         """Check if user ranked up and notify them"""
         try:
-            user_rank = ranking_manager.get_user_rank(user_id)
+            user_rank = (await AsyncDBWrapper.run_sync(ranking_manager.get_user_rank, user_id))
             if not user_rank:
                 return
                 
@@ -673,11 +674,11 @@ class RankingIntegration:
     async def award_daily_login_bonus(user_id: int):
         """Award daily login bonus if user hasn't been active today"""
         try:
-            success, points = ranking_manager.award_points(
+            success, points = (await AsyncDBWrapper.run_sync(ranking_manager.award_points,
                 user_id=user_id,
                 activity_type='daily_login',
                 description="Daily login bonus"
-            )
+            ))
             
             if success and points > 0:
                 logger.info(f"Awarded daily login bonus to user {user_id}")
@@ -690,11 +691,11 @@ class RankingIntegration:
         """Handle admin actions (optional - admins could also earn points)"""
         try:
             if admin_id in ADMIN_IDS and action_type in ['approve_post', 'moderate_content']:
-                success, points = ranking_manager.award_points(
+                success, points = (await AsyncDBWrapper.run_sync(ranking_manager.award_points,
                     user_id=admin_id,
                     activity_type='community_contribution',
                     description=f"Admin action: {action_type}"
-                )
+                ))
                 
                 if success:
                     logger.info(f"Awarded {points} points to admin {admin_id} for {action_type}")

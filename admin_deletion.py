@@ -438,7 +438,7 @@ def get_post_details_for_deletion(post_id: int) -> dict:
         db_conn = get_db_connection()
         placeholder = db_conn.get_placeholder()
         
-        with db_conn.get_connection() as conn:
+        with db_conn.get_connection(readonly=True) as conn:
             cursor = conn.cursor()
             
             cursor.execute(f"""
@@ -482,7 +482,7 @@ def get_comment_details_for_deletion(comment_id: int) -> dict:
         db_conn = get_db_connection()
         placeholder = db_conn.get_placeholder()
         
-        with db_conn.get_connection() as conn:
+        with db_conn.get_connection(readonly=True) as conn:
             cursor = conn.cursor()
             
             cursor.execute(f"""

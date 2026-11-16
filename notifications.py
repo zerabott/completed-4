@@ -13,6 +13,7 @@ from telegram.ext import ContextTypes
 from db_connection import get_db, get_db_connection, adapt_query
 from config import CATEGORIES
 from utils import escape_markdown_text, truncate_text
+from db_connection import AsyncDBWrapper
 
 logger = logging.getLogger(__name__)
 
@@ -441,7 +442,7 @@ async def notify_comment_on_post(context: ContextTypes.DEFAULT_TYPE, post_id: in
                 logger.error(f"Error fetching parent comment for notifications: {e}")
 
         # Get subscribers (only exclude the commenter, not the post author)
-        subscribers = get_post_subscribers(post_id)
+        subscribers = (await AsyncDBWrapper.run_sync(get_post_subscribers, post_id))
         if commenter_id:
             subscribers = [uid for uid in subscribers if uid != commenter_id]
 
@@ -451,10 +452,10 @@ async def notify_comment_on_post(context: ContextTypes.DEFAULT_TYPE, post_id: in
             subscribers = [uid for uid in subscribers if uid != parent_comment_user_id]
         
         # Always auto-subscribe post author and ensure they get notified (if they have notifications enabled)
-        author_prefs = get_user_preferences(post_author_id)
+        author_prefs = (await AsyncDBWrapper.run_sync(get_user_preferences, post_author_id))
         if author_prefs['comment_notifications']:
             # Subscribe the post author to their own post
-            subscribe_to_post(post_author_id, post_id)
+            (await AsyncDBWrapper.run_sync(subscribe_to_post, post_author_id, post_id))
             # Add post author to notification list if they're not the commenter and not already in the list
             if post_author_id != commenter_id and post_author_id not in subscribers:
                 subscribers.append(post_author_id)
@@ -466,7 +467,7 @@ async def notify_comment_on_post(context: ContextTypes.DEFAULT_TYPE, post_id: in
         # 1) Generic "new comment on post" notifications for subscribers & post author
         for subscriber_id in subscribers:
             try:
-                prefs = get_user_preferences(subscriber_id)
+                prefs = (await AsyncDBWrapper.run_sync(get_user_preferences, subscriber_id))
                 if not prefs['comment_notifications']:
                     logger.debug(f"User {subscriber_id} has comment notifications disabled, skipping")
                     continue
@@ -512,7 +513,7 @@ async def notify_comment_on_post(context: ContextTypes.DEFAULT_TYPE, post_id: in
         # 2) Specific notification to the author of the comment that was replied to
         if parent_comment_user_id and parent_comment_user_id != commenter_id:
             try:
-                prefs = get_user_preferences(parent_comment_user_id)
+                prefs = (await AsyncDBWrapper.run_sync(get_user_preferences, parent_comment_user_id))
                 if prefs.get('comment_notifications', True):
                     title = f"New reply to your comment on Post #{post_id}"
                     content_lines = [
@@ -597,12 +598,12 @@ async def notify_favorite_category_post(context: ContextTypes.DEFAULT_TYPE, post
         
         # Send notifications
         for user_id in category_subscribers:
-            prefs = get_user_preferences(user_id)
+            prefs = (await AsyncDBWrapper.run_sync(get_user_preferences, user_id))
             if category not in prefs['favorite_categories']:
                 continue
             
             # Auto-subscribe to posts in favorite categories
-            subscribe_to_post(user_id, post_id)
+            (await AsyncDBWrapper.run_sync(subscribe_to_post, user_id, post_id))
             
             title = f"New Post in {category}"
             notification_content = f"A new confession/question was posted in your favorite category!\n\n"
@@ -801,7 +802,7 @@ async def send_daily_digest(context: ContextTypes.DEFAULT_TYPE, user_id: int):
             todays_posts = cursor.fetchall()
             
             # Get user's favorite categories
-            prefs = get_user_preferences(user_id)
+            prefs = (await AsyncDBWrapper.run_sync(get_user_preferences, user_id))
             favorite_categories = prefs['favorite_categories']
             
             # Get posts in favorite categories from last 2 days
@@ -889,7 +890,7 @@ async def handle_notification_callback(update: Update, context: ContextTypes.DEF
     # Handle unsubscribe from post
     if data.startswith("unsub_"):
         post_id = int(data.replace("unsub_", ""))
-        success = unsubscribe_from_post(user_id, post_id)
+        success = (await AsyncDBWrapper.run_sync(unsubscribe_from_post, user_id, post_id))
         if success:
             await query.answer("🔕 Unsubscribed from this post!")
             await query.edit_message_text(
@@ -915,7 +916,7 @@ async def handle_notification_callback(update: Update, context: ContextTypes.DEF
 async def show_notification_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show notification settings interface"""
     user_id = update.effective_user.id
-    prefs = get_user_preferences(user_id)
+    prefs = (await AsyncDBWrapper.run_sync(get_user_preferences, user_id))
     
     settings_text = f"""
 🔔 *Smart Notifications Settings*

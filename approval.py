@@ -8,6 +8,7 @@ from submission import get_post_with_media, is_media_post, get_media_info, get_m
 
 # Import ranking system integration
 from ranking_integration import award_points_for_confession_approval, RankingIntegration
+from db_connection import AsyncDBWrapper
 
 def approve_post(post_id, message_id, post_number):
     """Approve a post and save channel message ID with sequential post number. Clears edited flag if present."""
@@ -25,7 +26,7 @@ def approve_post(post_id, message_id, post_number):
 def get_channel_message_id(post_id):
     """Get the channel message ID for an approved post"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(
@@ -41,15 +42,15 @@ async def update_channel_message(context, post_id: int, new_content: str, catego
     from submission import get_media_info, is_media_post
     from html import escape as html_escape
     
-    channel_message_id = get_channel_message_id(post_id)
+    channel_message_id = (await AsyncDBWrapper.run_sync(get_channel_message_id, post_id))
     if not channel_message_id:
         logging.error(f"No channel message found for post {post_id}")
         return False, "Channel message not found"
     
     try:
         # Get media info if this is a media post
-        is_media = is_media_post(post_id)
-        media_info = get_media_info(post_id) if is_media else None
+        is_media = (await AsyncDBWrapper.run_sync(is_media_post, post_id))
+        media_info = (await AsyncDBWrapper.run_sync(get_media_info, post_id)) if is_media else None
         
         # Build the updated caption/content
         bot_username_clean = BOT_USERNAME.lstrip('@')
@@ -155,7 +156,7 @@ def reject_post(post_id, rejection_reason=None, admin_id=None):
 def get_next_post_number():
     """Get the next sequential post number for approved posts"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT MAX(post_number) FROM posts WHERE post_number IS NOT NULL")
         result = cursor.fetchone()
@@ -191,7 +192,7 @@ def unblock_user(user_id):
 def get_post_by_id(post_id):
     """Get a specific post by ID"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(f"SELECT * FROM posts WHERE post_id={placeholder}", (post_id,))
@@ -200,7 +201,7 @@ def get_post_by_id(post_id):
 def is_blocked_user(user_id):
     """Check if user is blocked"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(f"SELECT blocked FROM users WHERE user_id={placeholder}", (user_id,))
@@ -253,7 +254,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Set is_sensitive to False for edited confessions (will check post later)
             is_sensitive = False
             # Get the post data for edited confessions
-            post = get_post_by_id(post_id)
+            post = (await AsyncDBWrapper.run_sync(get_post_by_id, post_id))
             if not post:
                 try:
                     await query.edit_message_text("❗ Post not found.")
@@ -267,7 +268,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Use helper function to check is_edited status reliably instead of array indexing
             from db import is_post_edited
-            is_edited = is_post_edited(post_id)
+            is_edited = (await AsyncDBWrapper.run_sync(is_post_edited, post_id))
             
             logging.info(f"Edited confession callback: post_id={post_id}, is_edited={is_edited}, was_approved={was_previously_approved}, post_length={len(post)}")
             
@@ -278,7 +279,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("approve_") or data.startswith("approve18_") or data.startswith("approve_sensitive_"):
         is_sensitive = data.startswith("approve18_") or data.startswith("approve_sensitive_")
         post_id = int(data.split("_")[1])
-        post = get_post_by_id(post_id)
+        post = (await AsyncDBWrapper.run_sync(get_post_by_id, post_id))
         if not post:
             try:
                 await query.edit_message_text("❗ Post not found.")
@@ -337,10 +338,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         try:
             # Get the next sequential post number
-            post_number = get_next_post_number()
+            post_number = (await AsyncDBWrapper.run_sync(get_next_post_number))
             
             # Get current comment count
-            comment_count = get_comment_count(post_id)
+            comment_count = (await AsyncDBWrapper.run_sync(get_comment_count, post_id))
             
             # Create inline buttons for the channel post
             bot_username_clean = BOT_USERNAME.lstrip('@')
@@ -395,7 +396,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not is_sensitive:
                 try:
                     from html import escape as html_escape
-                    author_profile = get_user_profile(submitter_id)
+                    author_profile = (await AsyncDBWrapper.run_sync(get_user_profile, submitter_id))
                     if author_profile and author_profile.get('display_name'):
                         bot_username_clean = BOT_USERNAME.lstrip('@')
                         emoji = author_profile.get('emoji') or ''
@@ -415,7 +416,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             is_media = False
             media_info = None
             try:
-                media_info = get_media_info(post_id)
+                media_info = (await AsyncDBWrapper.run_sync(get_media_info, post_id))
                 if media_info and media_info.get('type') and media_info.get('file_id'):
                     is_media = True
             except Exception as e:
@@ -434,7 +435,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if success:
                     logging.info(f"Channel message updated successfully for post {post_id}")
                     # Clear the edited flag but keep existing channel_message_id
-                    approve_post(post_id, None, post_number)  # Keep existing message ID
+                    (await AsyncDBWrapper.run_sync(approve_post, post_id, None, post_number))  # Keep existing message ID
                     channel_update_successful = True
                 else:
                     logging.error(f"Failed to update channel message: {result}")
@@ -526,11 +527,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Update database
             from db import set_post_sensitive
             if msg:
-                approve_post(post_id, msg.message_id, post_number)
+                (await AsyncDBWrapper.run_sync(approve_post, post_id, msg.message_id, post_number))
             else:
-                approve_post(post_id, None, post_number)
+                (await AsyncDBWrapper.run_sync(approve_post, post_id, None, post_number))
             
-            set_post_sensitive(post_id, is_sensitive)
+            (await AsyncDBWrapper.run_sync(set_post_sensitive, post_id, is_sensitive))
             
             # Send confirmation to admin
             try:
@@ -613,7 +614,7 @@ Your {escape_markdown_text(confession_type)} in category `{escape_markdown_text(
     if data.startswith("reject_"):
         # Get post details
         post_id = int(data.split("_")[1])
-        post = get_post_by_id(post_id)
+        post = (await AsyncDBWrapper.run_sync(get_post_by_id, post_id))
         if not post:
             try:
                 await query.edit_message_text("❗ Post not found.")
@@ -628,7 +629,7 @@ Your {escape_markdown_text(confession_type)} in category `{escape_markdown_text(
                 # Get post number if it exists
                 post_number = None
                 try:
-                    post_number = get_next_post_number()
+                    post_number = (await AsyncDBWrapper.run_sync(get_next_post_number))
                 except:
                     pass
                 
@@ -646,7 +647,7 @@ Your {escape_markdown_text(confession_type)} in category `{escape_markdown_text(
                 # Get post number if it exists
                 post_number = None
                 try:
-                    post_number = get_next_post_number()
+                    post_number = (await AsyncDBWrapper.run_sync(get_next_post_number))
                 except:
                     pass
                 
@@ -664,7 +665,7 @@ Your {escape_markdown_text(confession_type)} in category `{escape_markdown_text(
     elif data.startswith("flag_"):
         # Handle flagging
         post_id = int(data.split("_")[1])
-        flag_post(post_id)
+        (await AsyncDBWrapper.run_sync(flag_post, post_id))
         
         try:
             await query.edit_message_text("🚩 Submission flagged for review.")
@@ -682,7 +683,7 @@ Your {escape_markdown_text(confession_type)} in category `{escape_markdown_text(
             except ValueError:
                 # Not a numeric ID; ignore so profile-specific handlers can process it
                 return
-            block_user(block_uid)
+            (await AsyncDBWrapper.run_sync(block_user, block_uid))
             
             try:
                 await query.edit_message_text(f"⛔ User {block_uid} blocked.")
@@ -697,7 +698,7 @@ Your {escape_markdown_text(confession_type)} in category `{escape_markdown_text(
                 block_uid = int(parts[1])
             except ValueError:
                 return
-            unblock_user(block_uid)
+            (await AsyncDBWrapper.run_sync(unblock_user, block_uid))
             
             try:
                 await query.edit_message_text(f"✅ User {block_uid} unblocked.")
@@ -928,7 +929,7 @@ async def handle_rejection_cancel(update: Update, context: ContextTypes.DEFAULT_
         return
     
     post_id = int(parts[2])
-    post = get_post_by_id(post_id)
+    post = (await AsyncDBWrapper.run_sync(get_post_by_id, post_id))
     
     if not post:
         await query.edit_message_text("❗ Post not found.")
@@ -982,7 +983,7 @@ async def handle_rejection_cancel(update: Update, context: ContextTypes.DEFAULT_
 
 async def execute_rejection(query, post_id, rejection_reason, admin_id, context):
     """Execute the rejection with the given reason"""
-    post = get_post_by_id(post_id)
+    post = (await AsyncDBWrapper.run_sync(get_post_by_id, post_id))
     if not post:
         try:
             await query.edit_message_text("❗ Post not found.")
@@ -997,7 +998,7 @@ async def execute_rejection(query, post_id, rejection_reason, admin_id, context)
     category = post[2]
     
     # Reject the post with reason
-    reject_post(post_id, rejection_reason, admin_id)
+    (await AsyncDBWrapper.run_sync(reject_post, post_id, rejection_reason, admin_id))
     
     # Update admin interface - handle both text and media messages
     success_message = (
@@ -1123,7 +1124,7 @@ async def handle_custom_rejection_text(update: Update, context: ContextTypes.DEF
     context.user_data.pop('waiting_for_custom_rejection', None)
     
     # Execute the rejection
-    post = get_post_by_id(post_id)
+    post = (await AsyncDBWrapper.run_sync(get_post_by_id, post_id))
     if not post:
         await update.message.reply_text("❗ Post not found.")
         return
@@ -1132,7 +1133,7 @@ async def handle_custom_rejection_text(update: Update, context: ContextTypes.DEF
     category = post[2]
     
     # Reject the post with custom reason
-    reject_post(post_id, custom_reason, admin_id)
+    (await AsyncDBWrapper.run_sync(reject_post, post_id, custom_reason, admin_id))
     
     # Notify admin
     await update.message.reply_text(

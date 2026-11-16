@@ -6,7 +6,7 @@ import time
 import asyncio
 from typing import Any, Dict, List, Optional, Tuple, Union
 from contextlib import contextmanager
-from functools import lru_cache, wraps
+from functools import lru_cache, partial, wraps
 
 try:
     import psycopg2
@@ -108,8 +108,11 @@ class AsyncDBWrapper:
         if not cls._initialized:
             cls.initialize()
         
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(cls._executor, func, *args, **kwargs)
+        loop = asyncio.get_running_loop()
+        if kwargs:
+            func = partial(func, *args, **kwargs)
+            args = ()
+        return await loop.run_in_executor(cls._executor, func, *args)
 
 # Decorator to make synchronous database functions async
 def make_async(func):
@@ -195,6 +198,7 @@ class DatabaseConnection:
             # getconn() raises instead of waiting once the pool is drained, so callers queue
             # here rather than failing when more worker threads than connections are busy.
             self._pg_slots = threading.BoundedSemaphore(maxconn)
+            self._pg_local = threading.local()
             
             # Test connection
             with self.get_connection() as conn:
@@ -300,14 +304,23 @@ class DatabaseConnection:
         Only use it for statements that need no transaction.
         """
         if self.use_postgresql:
+            # Reuse the connection this thread already holds: a nested get_connection()
+            # would otherwise wait for a second pool slot, and with every slot held by
+            # a thread doing the same, the pool deadlocks.
+            held = getattr(self._pg_local, 'conn', None)
+            if held is not None:
+                yield held
+                return
             conn = None
             self._pg_slots.acquire()
             try:
                 conn = self.connection_pool.getconn()
                 if conn.autocommit != readonly:
                     conn.autocommit = readonly
+                self._pg_local.conn = conn
                 yield conn
             finally:
+                self._pg_local.conn = None
                 if conn:
                     self.connection_pool.putconn(conn)
                 self._pg_slots.release()

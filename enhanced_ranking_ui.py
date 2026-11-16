@@ -15,6 +15,7 @@ from enhanced_ranking_system import UserRank
 from ranking_integration import ranking_manager
 from utils import escape_markdown_text
 from logger import get_logger
+from db_connection import AsyncDBWrapper
 
 logger = get_logger('enhanced_ranking_ui')
 
@@ -107,7 +108,7 @@ class EnhancedRankingUI:
         from db_connection import get_db_connection
         try:
             db_conn = get_db_connection()
-            with db_conn.get_connection() as conn:
+            with db_conn.get_connection(readonly=True) as conn:
                 cursor = conn.cursor()
                 placeholder = db_conn.get_placeholder()
                 cursor.execute(f"SELECT consecutive_days FROM user_rankings WHERE user_id = {placeholder}", (user_id,))
@@ -446,17 +447,17 @@ class EnhancedRankingUI:
 async def show_enhanced_ranking_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show enhanced ranking menu with better UI"""
     user_id = update.effective_user.id
-    user_rank = ranking_manager.get_user_rank(user_id)
+    user_rank = (await AsyncDBWrapper.run_sync(ranking_manager.get_user_rank, user_id))
     
     if not user_rank:
-        ranking_manager.initialize_user_ranking(user_id)
-        user_rank = ranking_manager.get_user_rank(user_id)
+        (await AsyncDBWrapper.run_sync(ranking_manager.initialize_user_ranking, user_id))
+        user_rank = (await AsyncDBWrapper.run_sync(ranking_manager.get_user_rank, user_id))
     
     if not user_rank:
         await update.message.reply_text("❗ Error loading ranking information. Please try again.")
         return
     
-    rank_display = EnhancedRankingUI.format_enhanced_rank_display(user_rank, user_id)
+    rank_display = (await AsyncDBWrapper.run_sync(EnhancedRankingUI.format_enhanced_rank_display, user_rank, user_id))
     keyboard = EnhancedRankingUI.create_enhanced_ranking_keyboard(user_id)
     
     if update.callback_query:
@@ -553,10 +554,10 @@ async def show_enhanced_leaderboard(update: Update, context: ContextTypes.DEFAUL
 async def show_enhanced_achievements(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show enhanced achievements display"""
     user_id = update.effective_user.id
-    achievements = ranking_manager.get_user_achievements(user_id, limit=50)  # Get more for categorization
+    achievements = (await AsyncDBWrapper.run_sync(ranking_manager.get_user_achievements, user_id, limit=50))  # Get more for categorization
     
     # Get total achievement count
-    user_rank = ranking_manager.get_user_rank(user_id)
+    user_rank = (await AsyncDBWrapper.run_sync(ranking_manager.get_user_rank, user_id))
     achievement_count = user_rank.total_points if user_rank else 0
     
     achievements_text = EnhancedRankingUI.format_enhanced_achievements(achievements, achievement_count)
@@ -668,7 +669,7 @@ async def show_ranking_analytics(update: Update, context: ContextTypes.DEFAULT_T
         
         # Update daily stats first
         try:
-            analytics_manager.update_daily_stats()
+            (await AsyncDBWrapper.run_sync(analytics_manager.update_daily_stats))
         except Exception as e:
             logger.warning(f"Could not update daily stats: {e}")
         
@@ -679,7 +680,7 @@ async def show_ranking_analytics(update: Update, context: ContextTypes.DEFAULT_T
         
         try:
             # Get weekly trends (fall back to fewer weeks if data is sparse)
-            weekly_stats = analytics_manager.get_weekly_stats(weeks_back=2)
+            weekly_stats = (await AsyncDBWrapper.run_sync(analytics_manager.get_weekly_stats, weeks_back=2))
         except Exception as e:
             logger.warning(f"Could not get weekly stats: {e}")
             weekly_stats = {'error': str(e)}
@@ -786,7 +787,7 @@ async def show_ranking_analytics(update: Update, context: ContextTypes.DEFAULT_T
         
         # Personal ranking context for the user
         try:
-            user_rank = ranking_manager.get_user_rank(user_id)
+            user_rank = (await AsyncDBWrapper.run_sync(ranking_manager.get_user_rank, user_id))
             if user_rank:
                 analytics_text += "🎯 *Your Position*\n"
                 analytics_text += f"• Current Rank: {escape_markdown_text(user_rank.rank_emoji)} {escape_markdown_text(user_rank.rank_name)}\n"

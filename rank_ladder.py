@@ -13,6 +13,7 @@ from config import DB_PATH
 from utils import escape_markdown_text
 from logger import get_logger
 from ranking_integration import ranking_manager
+from db_connection import AsyncDBWrapper
 
 logger = get_logger('rank_ladder')
 
@@ -151,7 +152,7 @@ async def show_rank_ladder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     # Format the rank ladder text
-    ladder_text = RankLadderDisplay.format_rank_ladder(user_id)
+    ladder_text = (await AsyncDBWrapper.run_sync(RankLadderDisplay.format_rank_ladder, user_id))
     
     # Create keyboard with back button
     keyboard = [

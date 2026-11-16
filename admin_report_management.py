@@ -9,6 +9,7 @@ from config import ADMIN_IDS, CHANNEL_ID
 from utils import escape_markdown_text, truncate_text
 from enhanced_reporting import dismiss_reports_for_content
 from db_connection import get_db_connection, execute_query, adapt_query
+from db_connection import AsyncDBWrapper
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ async def handle_admin_delete_comment(update, context):
     # Get comment details before deletion
     try:
         detail_query = adapt_query("SELECT comment_id, post_id, content FROM comments WHERE comment_id = ?")
-        comment_info = execute_query(detail_query, (comment_id,), fetch='one')
+        comment_info = (await AsyncDBWrapper.run_sync(execute_query, detail_query, (comment_id,), fetch='one'))
     except Exception as e:
         logger.error(f"Error getting comment details: {e}")
         comment_info = None
@@ -69,7 +70,7 @@ async def handle_admin_delete_post(update, context):
     # Get post details before deletion
     try:
         detail_query = adapt_query("SELECT post_id, content, category, channel_message_id FROM posts WHERE post_id = ?")
-        post_info = execute_query(detail_query, (post_id,), fetch='one')
+        post_info = (await AsyncDBWrapper.run_sync(execute_query, detail_query, (post_id,), fetch='one'))
     except Exception as e:
         logger.error(f"Error getting post details: {e}")
         post_info = None
@@ -120,11 +121,11 @@ async def handle_confirm_delete_comment(update, context):
         admin_user_id = query.from_user.id
         
         # Replace the comment content instead of deleting
-        success, replacement_stats = replace_comment_with_message(
+        success, replacement_stats = (await AsyncDBWrapper.run_sync(replace_comment_with_message,
             comment_id=comment_id,
             admin_user_id=admin_user_id,
             replacement_message="[This comment has been removed by moderators]"
-        )
+        ))
         
         if success:
             # Dismiss all reports for this comment (already handled in replace function)
@@ -214,7 +215,7 @@ async def handle_confirm_delete_post(update, context):
                     channel_deleted = "ℹ️ No channel message to delete"
                 
                 # Dismiss all reports for this post
-                dismissed_count = dismiss_reports_for_content("post", post_id)
+                dismissed_count = (await AsyncDBWrapper.run_sync(dismiss_reports_for_content, "post", post_id))
                 
                 await query.edit_message_text(
                     f"✅ *Post Deleted Successfully*\\n\\n"

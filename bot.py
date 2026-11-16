@@ -5335,7 +5335,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "This message will be sent to all bot users.\n\n"
             "You can also send a photo, video, or document with a caption.\n\n"
             "Use the cancel button to return to the menu:",
-            reply_markup=reply_markup
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
         )
         context.user_data['state'] = 'admin_broadcast'
         return
@@ -5983,13 +5984,12 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    message = " ".join(context.args)
+    from admin_messaging import send_broadcast_message, strip_command_prefix
     
-    # Import the broadcast function
-    from admin_messaging import send_broadcast_message
+    text, entities = strip_command_prefix(update.message)
     
     try:
-        success, result = await send_broadcast_message(context, message, user_id)
+        success, result = await send_broadcast_message(context, user_id, text=text, entities=entities)
         
         if success:
             await update.message.reply_text(f"✅ {result}")
@@ -6054,45 +6054,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await admin_messages_panel(update, context)
             return
         
-        # Get the broadcast message and check for media
-        message = ""  # Initialize message as empty string
-        media_file = None
-        media_type = None
-        
-        # Check for text message
-        if update.message.text:
-            message = update.message.text
-        
-        # Check for media attachments with captions
-        if update.message.photo:
-            media_file = update.message.photo[-1].file_id  # Get highest resolution photo
-            media_type = 'photo'
-            # Check for caption
-            if update.message.caption:
-                message = update.message.caption
-        elif update.message.video:
-            media_file = update.message.video.file_id
-            media_type = 'video'
-            # Check for caption
-            if update.message.caption:
-                message = update.message.caption
-        elif update.message.document:
-            media_file = update.message.document.file_id
-            media_type = 'document'
-            # Check for caption
-            if update.message.caption:
-                message = update.message.caption
-        
-        # If no message and no media, prompt again
-        if not message and not media_file:
+        if not (update.message.text or update.message.effective_attachment):
             await update.message.reply_text("Please provide a message or media file to broadcast, or use the cancel button.")
             return
         
-        # Import the broadcast function
         from admin_messaging import send_broadcast_message
         
         try:
-            success, result = await send_broadcast_message(context, message, user_id, media_file, media_type)
+            success, result = await send_broadcast_message(context, user_id, message=update.message)
             
             if success:
                 await update.message.reply_text(f"✅ {result}")
@@ -10683,6 +10652,7 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO, handle_telegram_errors(handle_menu_choice)))
     application.add_handler(MessageHandler(filters.VIDEO, handle_telegram_errors(handle_menu_choice)))
     application.add_handler(MessageHandler(filters.ANIMATION, handle_telegram_errors(handle_menu_choice)))
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_telegram_errors(handle_menu_choice)))
     
     # Add text handler (must come after media handlers)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_telegram_errors(handle_menu_choice)))

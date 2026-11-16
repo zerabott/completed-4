@@ -6,102 +6,163 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 logger = logging.getLogger(__name__)
 
-async def send_broadcast_message(context, message, admin_id, media_file=None, media_type=None):
-    """Send broadcast message to all users with optional media support - OPTIMIZED for speed"""
+BROADCAST_HEADER = "📢\n\n"
+TEXT_LIMIT = 4096
+CAPTION_LIMIT = 1024
+
+
+def _utf16_len(text):
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _shift_entities(entities, cut=0, shift=0):
+    """Drop the first `cut` UTF-16 units of entity ranges, then move them by `shift`."""
+    from telegram import MessageEntity
+
+    shifted = []
+    for e in entities or []:
+        if e.offset + e.length <= cut:
+            continue
+        offset = max(e.offset - cut, 0)
+        length = e.offset + e.length - cut - offset
+        shifted.append(
+            MessageEntity(
+                type=e.type,
+                offset=offset + shift,
+                length=length,
+                url=e.url,
+                user=e.user,
+                language=e.language,
+                custom_emoji_id=e.custom_emoji_id,
+            )
+        )
+    return shifted
+
+
+def add_broadcast_header(text, entities, limit):
+    """Prefix the 📢 header, keeping the admin's formatting aligned with the text."""
+    if not text:
+        return BROADCAST_HEADER.strip(), []
+    if len(BROADCAST_HEADER) + len(text) > limit:
+        return text, list(entities or [])
+    return BROADCAST_HEADER + text, _shift_entities(entities, shift=_utf16_len(BROADCAST_HEADER))
+
+
+def strip_command_prefix(message):
+    """Return (text, entities) of a '/command args' message with the command removed.
+
+    Entity offsets are shifted so the admin's formatting (bold, links, ...) and
+    line breaks are kept exactly as typed.
+    """
+    from telegram import MessageEntity
+
+    text = message.text or ""
+    entities = list(message.entities or [])
+    command = next(
+        (e for e in entities if e.type == MessageEntity.BOT_COMMAND and e.offset == 0),
+        None,
+    )
+    if command is None:
+        return text, entities
+
+    # Commands and the whitespace after them are BMP characters, so one Python
+    # character equals one UTF-16 unit (the unit Telegram uses for offsets).
+    rest = text[command.length:]
+    cut = command.length + (len(rest) - len(rest.lstrip()))
+    return text[cut:], _shift_entities(entities, cut=cut)
+
+
+def _supports_caption(message):
+    return bool(
+        message.photo or message.video or message.animation
+        or message.document or message.audio or message.voice
+    )
+
+
+async def send_broadcast_message(context, admin_id, message=None, text=None, entities=None):
+    """Broadcast to all users exactly as the admin sent it, under a 📢 header.
+
+    Pass the admin's `message` to rebroadcast it (text or media + caption), or
+    `text`/`entities` for plain text. Nothing is escaped or sent with a parse
+    mode; the admin's own formatting entities are reused as-is.
+    """
     from db import get_all_users
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-    import logging
+    from telegram.error import RetryAfter
     import asyncio
-    
+
+    copy_kwargs = None
+    if message is not None and message.text:
+        text, entities = message.text, message.entities
+    elif message is not None:
+        copy_kwargs = {"from_chat_id": message.chat_id, "message_id": message.message_id}
+        if _supports_caption(message):
+            caption, caption_entities = add_broadcast_header(
+                message.caption, message.caption_entities, CAPTION_LIMIT
+            )
+            copy_kwargs.update(caption=caption, caption_entities=caption_entities)
+
+    if copy_kwargs is None:
+        if not text:
+            return False, "Nothing to broadcast"
+        text, entities = add_broadcast_header(text, entities, TEXT_LIMIT)
+
     logger.info(f"Admin {admin_id} initiating broadcast message")
-    
-    # Get all users
+
     try:
         all_users = get_all_users()
         logger.info(f"Found {len(all_users)} users to broadcast to")
     except Exception as e:
         logger.error(f"Error getting user list: {e}")
         return False, f"Error getting user list: {e}"
-    
+
     if not all_users:
         return False, "No users found in database"
-    
-    # Track success/failure
+
     success_count = 0
     failure_count = 0
     total_users = len(all_users)
-    
-    # Send progress update to admin
+
     try:
         progress_msg = await context.bot.send_message(
             chat_id=admin_id,
             text=f"📤 Broadcasting to {total_users} users...\n\n⏳ Progress: 0/{total_users} (0%)"
         )
-    except:
+    except Exception:
         progress_msg = None
-    
-    # Helper function to send a single message
+
+    async def deliver(user_id):
+        if copy_kwargs is not None:
+            await context.bot.copy_message(chat_id=user_id, **copy_kwargs)
+        else:
+            await context.bot.send_message(chat_id=user_id, text=text, entities=entities)
+
     async def send_to_user(user_id):
         nonlocal success_count, failure_count
-        
-        # Skip sending to the admin who initiated the broadcast
+
         if user_id == admin_id:
             return
-            
+
         try:
-            if media_file and media_type:
-                # Send media with caption
-                if media_type == 'photo':
-                    await context.bot.send_photo(
-                        chat_id=user_id,
-                        photo=media_file,
-                        caption=f"📢\n\n{escape_markdown_text(message)}" if message else "📢"
-                    )
-                elif media_type == 'video':
-                    await context.bot.send_video(
-                        chat_id=user_id,
-                        video=media_file,
-                        caption=f"📢\n\n{escape_markdown_text(message)}" if message else "📢"
-                    )
-                elif media_type == 'document':
-                    await context.bot.send_document(
-                        chat_id=user_id,
-                        document=media_file,
-                        caption=f"📢\n\n{escape_markdown_text(message)}" if message else "📢"
-                    )
-                else:
-                    # Fallback to text message if media type is unknown
-                    await context.bot.send_message(
-                        chat_id=user_id,
-                        text=f"📢\n\n{escape_markdown_text(message)}",
-                        parse_mode="MarkdownV2"
-                    )
-            else:
-                # Send text message only
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"📢\n\n{escape_markdown_text(message)}",
-                    parse_mode="MarkdownV2"
-                )
+            try:
+                await deliver(user_id)
+            except RetryAfter as e:
+                await asyncio.sleep(e.retry_after + 1)
+                await deliver(user_id)
             success_count += 1
-            
         except Exception as e:
             logger.error(f"Failed to send broadcast message to user {user_id}: {e}")
             failure_count += 1
-    
-    # Process users in batches for better performance
-    BATCH_SIZE = 20  # Process 20 users concurrently
-    DELAY_BETWEEN_BATCHES = 0.7  # Wait 0.7s between batches (allows ~28 msg/sec)
-    
+
+    BATCH_SIZE = 20
+    DELAY_BETWEEN_BATCHES = 0.7  # ~28 msg/sec, under Telegram's 30/sec limit
+
     for i in range(0, len(all_users), BATCH_SIZE):
         batch = all_users[i:i + BATCH_SIZE]
         user_ids = [user_data[0] for user_data in batch]
-        
-        # Send to all users in this batch concurrently
+
         await asyncio.gather(*[send_to_user(uid) for uid in user_ids], return_exceptions=True)
-        
-        # Update progress every batch
-        if progress_msg and (i + BATCH_SIZE) % 50 == 0:  # Update every ~50 users
+
+        if progress_msg and (i + BATCH_SIZE) % 50 == 0:
             try:
                 processed = min(i + BATCH_SIZE, total_users)
                 percentage = int((processed / total_users) * 100)
@@ -110,14 +171,12 @@ async def send_broadcast_message(context, message, admin_id, media_file=None, me
                     f"⏳ Progress: {processed}/{total_users} ({percentage}%)\n"
                     f"✅ Sent: {success_count} | ❌ Failed: {failure_count}"
                 )
-            except:
+            except Exception:
                 pass
-        
-        # Small delay between batches to avoid rate limits
+
         if i + BATCH_SIZE < len(all_users):
             await asyncio.sleep(DELAY_BETWEEN_BATCHES)
-    
-    # Final progress update
+
     if progress_msg:
         try:
             await progress_msg.edit_text(
@@ -126,13 +185,13 @@ async def send_broadcast_message(context, message, admin_id, media_file=None, me
                 f"✅ Sent: {success_count}\n"
                 f"❌ Failed: {failure_count}"
             )
-        except:
+        except Exception:
             pass
-    
+
     result_message = f"Broadcast sent successfully to {success_count} users"
     if failure_count > 0:
         result_message += f" ({failure_count} failed)"
-    
+
     logger.info(result_message)
     return True, result_message
 

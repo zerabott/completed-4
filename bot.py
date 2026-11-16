@@ -6161,13 +6161,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from admin_messaging import send_broadcast_message
         
         try:
-            # Copy the admin's message as-is so text, formatting and media arrive unchanged
-            success, result = await send_broadcast_message(
-                context,
-                user_id,
-                source_chat_id=update.message.chat_id,
-                source_message_id=update.message.message_id,
-            )
+            success, result = await send_broadcast_message(context, user_id, message=update.message)
             
             if success:
                 await update.message.reply_text(f"✅ {result}")

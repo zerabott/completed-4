@@ -6,6 +6,48 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 logger = logging.getLogger(__name__)
 
+BROADCAST_HEADER = "📢\n\n"
+TEXT_LIMIT = 4096
+CAPTION_LIMIT = 1024
+
+
+def _utf16_len(text):
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _shift_entities(entities, cut=0, shift=0):
+    """Drop the first `cut` UTF-16 units of entity ranges, then move them by `shift`."""
+    from telegram import MessageEntity
+
+    shifted = []
+    for e in entities or []:
+        if e.offset + e.length <= cut:
+            continue
+        offset = max(e.offset - cut, 0)
+        length = e.offset + e.length - cut - offset
+        shifted.append(
+            MessageEntity(
+                type=e.type,
+                offset=offset + shift,
+                length=length,
+                url=e.url,
+                user=e.user,
+                language=e.language,
+                custom_emoji_id=e.custom_emoji_id,
+            )
+        )
+    return shifted
+
+
+def add_broadcast_header(text, entities, limit):
+    """Prefix the 📢 header, keeping the admin's formatting aligned with the text."""
+    if not text:
+        return BROADCAST_HEADER.strip(), []
+    if len(BROADCAST_HEADER) + len(text) > limit:
+        return text, list(entities or [])
+    return BROADCAST_HEADER + text, _shift_entities(entities, shift=_utf16_len(BROADCAST_HEADER))
+
+
 def strip_command_prefix(message):
     """Return (text, entities) of a '/command args' message with the command removed.
 
@@ -27,43 +69,42 @@ def strip_command_prefix(message):
     # character equals one UTF-16 unit (the unit Telegram uses for offsets).
     rest = text[command.length:]
     cut = command.length + (len(rest) - len(rest.lstrip()))
-    new_text = text[cut:]
-
-    new_entities = []
-    for e in entities:
-        if e is command or e.offset + e.length <= cut:
-            continue
-        offset = max(e.offset - cut, 0)
-        length = e.offset + e.length - cut - offset
-        new_entities.append(
-            MessageEntity(
-                type=e.type,
-                offset=offset,
-                length=length,
-                url=e.url,
-                user=e.user,
-                language=e.language,
-                custom_emoji_id=e.custom_emoji_id,
-            )
-        )
-    return new_text, new_entities
+    return text[cut:], _shift_entities(entities, cut=cut)
 
 
-async def send_broadcast_message(context, admin_id, source_chat_id=None, source_message_id=None,
-                                 text=None, entities=None):
-    """Broadcast to all users exactly as the admin sent it.
+def _supports_caption(message):
+    return bool(
+        message.photo or message.video or message.animation
+        or message.document or message.audio or message.voice
+    )
 
-    With source_chat_id/source_message_id the admin's message is copied as-is
-    (text, formatting, photo/video/document/etc. and caption). Otherwise `text`
-    is sent with its original `entities` and no parse mode, so nothing is
-    escaped or re-interpreted.
+
+async def send_broadcast_message(context, admin_id, message=None, text=None, entities=None):
+    """Broadcast to all users exactly as the admin sent it, under a 📢 header.
+
+    Pass the admin's `message` to rebroadcast it (text or media + caption), or
+    `text`/`entities` for plain text. Nothing is escaped or sent with a parse
+    mode; the admin's own formatting entities are reused as-is.
     """
     from db import get_all_users
     from telegram.error import RetryAfter
     import asyncio
 
-    if source_message_id is None and not text:
-        return False, "Nothing to broadcast"
+    copy_kwargs = None
+    if message is not None and message.text:
+        text, entities = message.text, message.entities
+    elif message is not None:
+        copy_kwargs = {"from_chat_id": message.chat_id, "message_id": message.message_id}
+        if _supports_caption(message):
+            caption, caption_entities = add_broadcast_header(
+                message.caption, message.caption_entities, CAPTION_LIMIT
+            )
+            copy_kwargs.update(caption=caption, caption_entities=caption_entities)
+
+    if copy_kwargs is None:
+        if not text:
+            return False, "Nothing to broadcast"
+        text, entities = add_broadcast_header(text, entities, TEXT_LIMIT)
 
     logger.info(f"Admin {admin_id} initiating broadcast message")
 
@@ -90,12 +131,8 @@ async def send_broadcast_message(context, admin_id, source_chat_id=None, source_
         progress_msg = None
 
     async def deliver(user_id):
-        if source_message_id is not None:
-            await context.bot.copy_message(
-                chat_id=user_id,
-                from_chat_id=source_chat_id,
-                message_id=source_message_id,
-            )
+        if copy_kwargs is not None:
+            await context.bot.copy_message(chat_id=user_id, **copy_kwargs)
         else:
             await context.bot.send_message(chat_id=user_id, text=text, entities=entities)
 

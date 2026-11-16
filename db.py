@@ -784,7 +784,7 @@ def get_user_info(user_id):
         return cached
     
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(f'''
@@ -803,7 +803,7 @@ def get_user_info(user_id):
 def get_all_users():
     """Get all users from the database"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         cursor.execute('''
             SELECT user_id, username, first_name, last_name, join_date, 
@@ -823,7 +823,7 @@ def get_comment_count(post_id):
         return cached
     
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         # Index on comments(post_id) makes this very fast
@@ -845,7 +845,7 @@ def is_blocked_user(user_id):
         return cached
     
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(f'SELECT blocked FROM users WHERE user_id = {placeholder}', (user_id,))
@@ -904,7 +904,7 @@ async def delete_user_post_async(post_id: int, user_id: int) -> bool:
 def get_user_posts(user_id, limit=10):
     """Get user's posts with status, comment count, and media information"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         
@@ -946,7 +946,7 @@ def get_user_posts(user_id, limit=10):
 def get_post_author_id(post_id):
     """Get the user_id of the post author"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(f'SELECT user_id FROM posts WHERE post_id = {placeholder}', (post_id,))
@@ -1020,7 +1020,7 @@ def set_post_sensitive(post_id: int, is_sensitive: bool = True) -> bool:
 def is_post_sensitive(post_id: int) -> bool:
     """Return True if the given post is marked as sensitive/explicit."""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         try:
@@ -1037,7 +1037,7 @@ def is_post_sensitive(post_id: int) -> bool:
 def is_post_edited(post_id: int) -> bool:
     """Return True if the post has been edited by the user."""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         try:
@@ -1069,7 +1069,7 @@ def clear_edited_flag(post_id: int) -> bool:
 def search_user_by_id(user_id):
     """Search for a user by their exact user ID"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(f'''
@@ -1083,7 +1083,7 @@ def search_user_by_id(user_id):
 def search_users_by_name(search_term, limit=10):
     """Search for users by username, first name, or last name (case-insensitive partial match)"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         
@@ -1118,7 +1118,7 @@ def search_users_by_name(search_term, limit=10):
 def get_recent_users(limit=10):
     """Get recently joined users"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(f'''
@@ -1133,7 +1133,7 @@ def get_recent_users(limit=10):
 def get_active_users(limit=10):
     """Get users with recent activity (posts or comments)"""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         
@@ -1188,10 +1188,84 @@ def unblock_user(user_id):
 # ---------------------------------------------------------------------------
 
 
+PROFILE_CACHE_TTL = 60
+
+
+def invalidate_user_profile_cache(user_id) -> None:
+    """Drop cached profile data for a user."""
+    cache_manager.delete(f'user_profile_{user_id}')
+
+
+PROFILE_COLUMNS = '''user_id, display_name, emoji, bio, is_active, gender, age,
+                     department, year, religion, relationship_status, other_info, accepting_contacts'''
+
+
+def _profile_row_to_dict(row):
+    return {
+        'user_id': row[0],
+        'display_name': row[1],
+        'emoji': row[2],
+        'bio': row[3] or '',
+        'is_active': bool(row[4]),
+        'gender': row[5] or '',
+        'age': row[6],
+        'department': row[7] or '',
+        'year': row[8] or '',
+        'religion': row[9] or '',
+        'relationship_status': row[10] or '',
+        'other_info': row[11] or '',
+        'accepting_contacts': bool(row[12]) if row[12] is not None else True,
+    }
+
+
+def get_user_profiles_bulk(user_ids):
+    """Return {user_id: profile or None} for many users in a single round trip."""
+    wanted = [uid for uid in dict.fromkeys(user_ids) if uid is not None]
+    if not wanted:
+        return {}
+
+    profiles = {}
+    missing = []
+    for user_id in wanted:
+        cached = cache_manager.get(f'user_profile_{user_id}')
+        if cached is not None:
+            profiles[user_id] = None if cached == 'none' else cached
+        else:
+            missing.append(user_id)
+
+    if missing:
+        db_conn = get_db_connection()
+        with db_conn.get_connection(readonly=True) as conn:
+            cursor = conn.cursor()
+            placeholders = ', '.join([db_conn.get_placeholder()] * len(missing))
+            cursor.execute(
+                f'SELECT {PROFILE_COLUMNS} FROM user_profiles WHERE user_id IN ({placeholders})',
+                tuple(missing),
+            )
+            for row in cursor.fetchall():
+                profile = _profile_row_to_dict(row)
+                profiles[profile['user_id']] = profile
+        for user_id in missing:
+            profile = profiles.get(user_id)
+            profiles[user_id] = profile
+            cache_manager.set(
+                f'user_profile_{user_id}',
+                profile if profile else 'none',
+                PROFILE_CACHE_TTL,
+            )
+
+    return profiles
+
+
 def get_user_profile(user_id):
     """Return user's profile as a dict or None if not set."""
+    cache_key = f'user_profile_{user_id}'
+    cached = cache_manager.get(cache_key)
+    if cached is not None:
+        return cached if cached != 'none' else None
+
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(
@@ -1202,22 +1276,11 @@ def get_user_profile(user_id):
         )
         row = cursor.fetchone()
         if not row:
+            cache_manager.set(cache_key, 'none', PROFILE_CACHE_TTL)
             return None
-        return {
-            'user_id': row[0],
-            'display_name': row[1],
-            'emoji': row[2],
-            'bio': row[3] or '',
-            'is_active': bool(row[4]),
-            'gender': row[5] or '',
-            'age': row[6],
-            'department': row[7] or '',
-            'year': row[8] or '',
-            'religion': row[9] or '',
-            'relationship_status': row[10] or '',
-            'other_info': row[11] or '',
-            'accepting_contacts': bool(row[12]) if row[12] is not None else True,
-        }
+        profile = _profile_row_to_dict(row)
+        cache_manager.set(cache_key, profile, PROFILE_CACHE_TTL)
+        return profile
 
 
 def delete_user_profile(user_id: int) -> bool:
@@ -1231,6 +1294,7 @@ def delete_user_profile(user_id: int) -> bool:
             (user_id,),
         )
         conn.commit()
+        invalidate_user_profile_cache(user_id)
         return cursor.rowcount > 0
 
 
@@ -1287,6 +1351,7 @@ def upsert_user_profile(user_id, display_name, emoji, bio, is_active=True, gende
                  religion, relationship_status, other_info, user_id),
             )
         conn.commit()
+        invalidate_user_profile_cache(user_id)
         return True
 
 
@@ -1317,6 +1382,7 @@ def set_profile_visibility(user_id, is_active: bool) -> bool:
             )
 
         conn.commit()
+        invalidate_user_profile_cache(user_id)
         return cursor.rowcount > 0
 
 
@@ -1344,6 +1410,7 @@ def set_profile_accepting_contacts(user_id, accepting: bool) -> bool:
             )
 
         conn.commit()
+        invalidate_user_profile_cache(user_id)
         return cursor.rowcount > 0
 
 
@@ -1356,7 +1423,7 @@ def get_profile_contact(user1_id: int, user2_id: int):
     """Get existing profile contact between two users, or None."""
     db_conn = get_db_connection()
     a_id, b_id = _normalize_pair(user1_id, user2_id)
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(
@@ -1561,7 +1628,7 @@ def block_profile_user(blocker_id: int, blocked_id: int) -> bool:
 def is_profile_blocked(blocker_id: int, other_id: int) -> bool:
     """Return True if blocker_id has blocked other_id."""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(
@@ -1596,7 +1663,7 @@ def unblock_profile_user(blocker_id: int, blocked_id: int) -> bool:
 def get_blocked_users(blocker_id: int):
     """Get list of all users blocked by this user."""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(
@@ -1619,7 +1686,7 @@ def get_blocked_users(blocker_id: int):
 def get_profile_contact_by_id(contact_id: int):
     """Get a profile contact row by its ID, or None if not found."""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(
@@ -1645,36 +1712,29 @@ def get_profile_contact_by_id(contact_id: int):
 def get_user_profile_stats(user_id: int):
     """Return simple stats for a profile: number of confessions and comments."""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
 
-        # Count approved confessions
+        # Approved confessions and comments (replies included) in one round trip
         cursor.execute(
-            f'SELECT COUNT(*) FROM posts WHERE user_id = {placeholder} AND approved = 1',
-            (user_id,),
+            f'''SELECT
+                    (SELECT COUNT(*) FROM posts WHERE user_id = {placeholder} AND approved = 1),
+                    (SELECT COUNT(*) FROM comments WHERE user_id = {placeholder})''',
+            (user_id, user_id),
         )
-        post_row = cursor.fetchone()
-        confessions = post_row[0] if post_row else 0
-
-        # Count comments (replies included)
-        cursor.execute(
-            f'SELECT COUNT(*) FROM comments WHERE user_id = {placeholder}',
-            (user_id,),
-        )
-        comment_row = cursor.fetchone()
-        comments = comment_row[0] if comment_row else 0
+        row = cursor.fetchone()
 
         return {
-            'confessions': confessions,
-            'comments': comments,
+            'confessions': row[0] if row else 0,
+            'comments': row[1] if row else 0,
         }
 
 
 def get_user_active_chats(user_id: int):
     """Get all active profile chats for a user."""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(
@@ -1703,7 +1763,7 @@ def get_user_active_chats(user_id: int):
 def get_user_pending_requests(user_id: int):
     """Get all pending incoming contact requests for a user (where user is NOT the initiator)."""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         cursor.execute(
@@ -1732,7 +1792,7 @@ def get_user_pending_requests(user_id: int):
 def get_user_daily_message_count(user_id: int) -> int:
     """Get the number of messages sent by a user today."""
     db_conn = get_db_connection()
-    with db_conn.get_connection() as conn:
+    with db_conn.get_connection(readonly=True) as conn:
         cursor = conn.cursor()
         placeholder = db_conn.get_placeholder()
         
